@@ -993,3 +993,521 @@ export function createResolvedGrain(
     grainId: computeGrainId(dimensions),
   };
 }
+
+// ---------------------------------------------------------------------------
+// METRIC DEPENDENCY ANALYSIS
+// ---------------------------------------------------------------------------
+
+/**
+ * Error thrown when a cycle is detected in metric dependencies.
+ */
+export class MetricCycleError extends Error {
+  constructor(
+    message: string,
+    public readonly cycle: string[]
+  ) {
+    super(message);
+    this.name = "MetricCycleError";
+  }
+}
+
+/**
+ * Analyze metric dependencies from a LogicalExpr.
+ * Returns the set of metric names this expression depends on.
+ */
+export function analyzeMetricDependencies(expr: LogicalExpr): Set<string> {
+  const deps = new Set<string>();
+
+  function walk(e: LogicalExpr): void {
+    switch (e.kind) {
+      case "Constant":
+        break;
+      case "AttributeRef":
+        break;
+      case "MetricRef":
+        deps.add(e.metricName);
+        break;
+      case "Aggregate":
+        walk(e.input);
+        if (e.filter) walk(e.filter);
+        break;
+      case "ScalarOp":
+        walk(e.left);
+        walk(e.right);
+        break;
+      case "ScalarFunction":
+        e.args.forEach(walk);
+        break;
+      case "Conditional":
+        walk(e.condition);
+        walk(e.thenExpr);
+        walk(e.elseExpr);
+        break;
+      case "Coalesce":
+        e.exprs.forEach(walk);
+        break;
+      case "Comparison":
+        walk(e.left);
+        walk(e.right);
+        break;
+      case "LogicalOp":
+        e.operands.forEach(walk);
+        break;
+      case "InList":
+        walk(e.expr);
+        break;
+      case "Between":
+        walk(e.expr);
+        walk(e.low);
+        walk(e.high);
+        break;
+      case "IsNull":
+        walk(e.expr);
+        break;
+    }
+  }
+
+  walk(expr);
+  return deps;
+}
+
+/**
+ * Build a dependency graph for metrics.
+ * Returns a map from metric name to its dependencies.
+ */
+export function buildDependencyGraph(
+  metricNames: string[],
+  metricExprs: Map<string, LogicalExpr>
+): Map<string, Set<string>> {
+  const graph = new Map<string, Set<string>>();
+
+  for (const name of metricNames) {
+    const expr = metricExprs.get(name);
+    if (expr) {
+      const deps = analyzeMetricDependencies(expr);
+      // Filter to only include dependencies that are in our metric set
+      const relevantDeps = new Set(
+        [...deps].filter((d) => metricNames.includes(d))
+      );
+      graph.set(name, relevantDeps);
+    } else {
+      graph.set(name, new Set());
+    }
+  }
+
+  return graph;
+}
+
+/**
+ * Detect cycles in a dependency graph using DFS.
+ * Returns the first cycle found, or null if no cycles.
+ */
+export function detectCycle(
+  graph: Map<string, Set<string>>
+): string[] | null {
+  const WHITE = 0; // Not visited
+  const GRAY = 1;  // Currently being visited (on stack)
+  const BLACK = 2; // Fully processed
+
+  const color = new Map<string, number>();
+  const parent = new Map<string, string | null>();
+
+  for (const node of graph.keys()) {
+    color.set(node, WHITE);
+    parent.set(node, null);
+  }
+
+  function dfs(node: string, path: string[]): string[] | null {
+    color.set(node, GRAY);
+    path.push(node);
+
+    const deps = graph.get(node) ?? new Set();
+    for (const dep of deps) {
+      if (!graph.has(dep)) continue; // External dependency
+
+      const depColor = color.get(dep);
+      if (depColor === GRAY) {
+        // Found a cycle - extract it
+        const cycleStart = path.indexOf(dep);
+        return [...path.slice(cycleStart), dep];
+      }
+      if (depColor === WHITE) {
+        const cycle = dfs(dep, path);
+        if (cycle) return cycle;
+      }
+    }
+
+    path.pop();
+    color.set(node, BLACK);
+    return null;
+  }
+
+  for (const node of graph.keys()) {
+    if (color.get(node) === WHITE) {
+      const cycle = dfs(node, []);
+      if (cycle) return cycle;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Compute topological sort for metric evaluation order.
+ * Also computes execution phases (0 = base aggregates, 1+ = derived).
+ * Throws MetricCycleError if a cycle is detected.
+ */
+export function topologicalSortMetrics(
+  metricNames: string[],
+  graph: Map<string, Set<string>>
+): { order: string[]; phases: Map<string, number> } {
+  // Check for cycles first
+  const cycle = detectCycle(graph);
+  if (cycle) {
+    throw new MetricCycleError(
+      `Circular dependency detected: ${cycle.join(" -> ")}`,
+      cycle
+    );
+  }
+
+  // Kahn's algorithm for topological sort
+  const inDegree = new Map<string, number>();
+  for (const name of metricNames) {
+    inDegree.set(name, 0);
+  }
+
+  for (const [_, deps] of graph) {
+    for (const dep of deps) {
+      if (inDegree.has(dep)) {
+        inDegree.set(dep, (inDegree.get(dep) ?? 0) + 1);
+      }
+    }
+  }
+
+  // Actually we need reverse: count how many depend on each
+  // Reset and do it properly
+  for (const name of metricNames) {
+    inDegree.set(name, 0);
+  }
+
+  // Count incoming edges (how many metrics does this depend on)
+  for (const name of metricNames) {
+    const deps = graph.get(name) ?? new Set();
+    for (const dep of deps) {
+      if (metricNames.includes(dep)) {
+        inDegree.set(name, (inDegree.get(name) ?? 0) + 1);
+      }
+    }
+  }
+
+  // Actually let's use a simpler approach: BFS from roots
+  const order: string[] = [];
+  const phases = new Map<string, number>();
+  const processed = new Set<string>();
+
+  // Start with metrics that have no dependencies
+  let currentPhase: string[] = [];
+  for (const name of metricNames) {
+    const deps = graph.get(name) ?? new Set();
+    const unprocessedDeps = [...deps].filter(
+      (d) => metricNames.includes(d) && !processed.has(d)
+    );
+    if (unprocessedDeps.length === 0) {
+      currentPhase.push(name);
+    }
+  }
+
+  let phaseNum = 0;
+  while (currentPhase.length > 0) {
+    // Process current phase
+    for (const name of currentPhase) {
+      order.push(name);
+      phases.set(name, phaseNum);
+      processed.add(name);
+    }
+
+    // Find next phase - metrics whose deps are now all processed
+    const nextPhase: string[] = [];
+    for (const name of metricNames) {
+      if (processed.has(name)) continue;
+
+      const deps = graph.get(name) ?? new Set();
+      const unprocessedDeps = [...deps].filter(
+        (d) => metricNames.includes(d) && !processed.has(d)
+      );
+      if (unprocessedDeps.length === 0) {
+        nextPhase.push(name);
+      }
+    }
+
+    currentPhase = nextPhase;
+    phaseNum++;
+  }
+
+  return { order, phases };
+}
+
+// ---------------------------------------------------------------------------
+// FILTER CLASSIFICATION
+// ---------------------------------------------------------------------------
+
+/**
+ * Classify a filter as pre-aggregate or post-aggregate.
+ * Pre-aggregate filters only reference dimension attributes.
+ * Post-aggregate filters reference metrics or aggregated values.
+ */
+export function classifyFilter(
+  predicate: LogicalPredicate,
+  metricNames: Set<string>
+): "pre" | "post" {
+  let hasMetricRef = false;
+  let hasAggregate = false;
+
+  function walk(e: LogicalExpr): void {
+    switch (e.kind) {
+      case "MetricRef":
+        if (metricNames.has(e.metricName)) {
+          hasMetricRef = true;
+        }
+        break;
+      case "Aggregate":
+        hasAggregate = true;
+        walk(e.input);
+        if (e.filter) walk(e.filter);
+        break;
+      case "ScalarOp":
+        walk(e.left);
+        walk(e.right);
+        break;
+      case "ScalarFunction":
+        e.args.forEach(walk);
+        break;
+      case "Conditional":
+        walk(e.condition);
+        walk(e.thenExpr);
+        walk(e.elseExpr);
+        break;
+      case "Coalesce":
+        e.exprs.forEach(walk);
+        break;
+      case "Comparison":
+        walk(e.left);
+        walk(e.right);
+        break;
+      case "LogicalOp":
+        e.operands.forEach(walk);
+        break;
+      case "InList":
+        walk(e.expr);
+        break;
+      case "Between":
+        walk(e.expr);
+        walk(e.low);
+        walk(e.high);
+        break;
+      case "IsNull":
+        walk(e.expr);
+        break;
+      default:
+        break;
+    }
+  }
+
+  walk(predicate);
+  return hasMetricRef || hasAggregate ? "post" : "pre";
+}
+
+// ---------------------------------------------------------------------------
+// BUILD LOGICAL PLAN
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a complete logical query plan from a query specification.
+ * This is the main entry point for Phase 4.
+ *
+ * @param query - The query specification
+ * @param model - The semantic model
+ * @param options - Optional plan building options
+ * @returns The complete logical query plan
+ */
+export function buildLogicalPlan(
+  query: QuerySpecV2,
+  model: SemanticModel,
+  options: PlanBuilderOptions = {}
+): LogicalQueryPlan {
+  resetNodeIdCounter(); // Ensure predictable IDs for testing
+  const dag = new PlanDag();
+
+  // 1. Resolve dimensions
+  const dimensionRefs = resolveAttributeRefs(query.dimensions, model);
+  const outputGrain = createResolvedGrain(dimensionRefs);
+
+  // 2. Resolve metrics and their expressions
+  const metricExprs = new Map<string, LogicalExpr>();
+  const metricBaseFacts = new Map<string, string | null>();
+
+  for (const metricName of query.metrics) {
+    const metricDef = model.metrics[metricName] as any; // MetricDefinitionV2
+    if (!metricDef) {
+      throw new Error(`Unknown metric: "${metricName}"`);
+    }
+
+    // Get the expression AST (MetricDefinitionV2 has exprAst)
+    const exprAst = metricDef.exprAst;
+    if (!exprAst) {
+      throw new Error(`Metric "${metricName}" has no expression AST`);
+    }
+
+    // Transform the metric expression to LogicalExpr
+    const logicalExpr = syntaxToLogical(
+      exprAst,
+      model,
+      metricDef.baseFact ?? null,
+      { strictMode: false } // Allow Window/Transform placeholders
+    );
+
+    metricExprs.set(metricName, logicalExpr);
+    metricBaseFacts.set(metricName, metricDef.baseFact ?? null);
+  }
+
+  // 3. Analyze metric dependencies and compute evaluation order
+  const depGraph = buildDependencyGraph(query.metrics, metricExprs);
+  const { order: metricEvalOrder, phases } = topologicalSortMetrics(
+    query.metrics,
+    depGraph
+  );
+
+  // 4. Collect all required attributes from metrics and dimensions
+  const allRequiredAttrs = new Set<string>();
+
+  // Add dimension attributes
+  for (const dim of query.dimensions) {
+    allRequiredAttrs.add(dim);
+  }
+
+  // Add attributes from metric expressions
+  for (const expr of metricExprs.values()) {
+    const attrRefs = collectAttributeRefs(expr);
+    for (const ref of attrRefs) {
+      if (ref.attributeId !== "*") {
+        allRequiredAttrs.add(ref.attributeId);
+      }
+    }
+  }
+
+  // 5. Group attributes by table
+  const attrsByTable = new Map<string, LogicalAttributeRef[]>();
+  for (const attrName of allRequiredAttrs) {
+    const ref = resolveAttributeRef(attrName, model);
+    if (ref) {
+      const existing = attrsByTable.get(ref.physicalTable) ?? [];
+      existing.push(ref);
+      attrsByTable.set(ref.physicalTable, existing);
+    }
+  }
+
+  // 6. Determine base fact table(s)
+  const baseFacts = new Set<string>();
+  for (const [_, baseFact] of metricBaseFacts) {
+    if (baseFact) {
+      const factTable = model.facts[baseFact]?.table ?? baseFact;
+      baseFacts.add(factTable);
+    }
+  }
+
+  // If no metrics have a baseFact, infer from attributes
+  if (baseFacts.size === 0) {
+    for (const [table, _] of attrsByTable) {
+      // Check if it's a fact table
+      for (const [factId, factDef] of Object.entries(model.facts)) {
+        const factTable = factDef.table ?? factId;
+        if (factTable === table) {
+          baseFacts.add(factTable);
+        }
+      }
+    }
+  }
+
+  // Default to first fact if none determined
+  if (baseFacts.size === 0 && Object.keys(model.facts).length > 0) {
+    const firstFact = Object.keys(model.facts)[0];
+    baseFacts.add(model.facts[firstFact].table ?? firstFact);
+  }
+
+  // 7. Build the plan DAG
+  let currentNodeId: PlanNodeId | null = null;
+
+  for (const factTable of baseFacts) {
+    // Get fact columns
+    const factCols = attrsByTable.get(factTable) ?? [];
+
+    // Get dimension columns grouped by table
+    const dimCols = new Map<string, LogicalAttributeRef[]>();
+    for (const [table, cols] of attrsByTable) {
+      if (table !== factTable) {
+        // Check if it's a dimension table
+        const isDim = Object.entries(model.dimensions).some(
+          ([dimId, dimDef]) => (dimDef.table ?? dimId) === table
+        );
+        if (isDim) {
+          dimCols.set(table, cols);
+        }
+      }
+    }
+
+    // Build scan + join plan for this fact
+    const joinedId = buildJoinedScanPlan(factTable, factCols, dimCols, model, dag);
+    currentNodeId = joinedId;
+  }
+
+  if (!currentNodeId) {
+    throw new Error("No fact table could be determined for the query");
+  }
+
+  // 8. Add aggregate node
+  const aggregates: Array<{ outputName: string; expr: LogicalAggregate }> = [];
+
+  for (const metricName of metricEvalOrder) {
+    const expr = metricExprs.get(metricName);
+    const phase = phases.get(metricName) ?? 0;
+
+    // Only phase 0 metrics become plan-level aggregates
+    if (phase === 0 && expr && expr.kind === "Aggregate") {
+      aggregates.push({
+        outputName: metricName,
+        expr: expr as LogicalAggregate,
+      });
+    }
+  }
+
+  if (aggregates.length > 0 || dimensionRefs.length > 0) {
+    const aggNode = createAggregate(currentNodeId, dimensionRefs, aggregates);
+    dag.addNode(aggNode);
+    currentNodeId = aggNode.id;
+  }
+
+  dag.setRoot(currentNodeId);
+
+  // 9. Build LogicalMetricPlan for each metric
+  const outputMetrics: LogicalMetricPlan[] = [];
+
+  for (const metricName of query.metrics) {
+    const expr = metricExprs.get(metricName)!;
+    const baseFact = metricBaseFacts.get(metricName) ?? null;
+    const deps = depGraph.get(metricName) ?? new Set();
+    const attrRefs = collectAttributeRefs(expr);
+    const phase = phases.get(metricName) ?? 0;
+
+    outputMetrics.push({
+      name: metricName,
+      expr,
+      baseFact,
+      dependencies: [...deps],
+      requiredAttrs: attrRefs.filter((r) => r.attributeId !== "*"),
+      executionPhase: phase,
+    });
+  }
+
+  // 10. Assemble the final plan
+  return assemblePlan(dag, outputGrain, outputMetrics, metricEvalOrder);
+}

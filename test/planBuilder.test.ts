@@ -5,6 +5,8 @@ import {
   SemanticModel,
   MetricExpr,
   aggregateMetric,
+  buildMetricFromExpr,
+  Expr,
 } from "../src/semanticEngine";
 import {
   LogicalAttributeRef,
@@ -50,6 +52,14 @@ import {
   findTransformExprs,
   windowInfoToPlanNode,
   transformInfoToPlanNode,
+  // Phase 4 exports
+  MetricCycleError,
+  analyzeMetricDependencies,
+  buildDependencyGraph,
+  detectCycle,
+  topologicalSortMetrics,
+  classifyFilter,
+  buildLogicalPlan,
 } from "../src/planBuilder";
 
 // ---------------------------------------------------------------------------
@@ -1237,5 +1247,403 @@ describe("Plan Visualization with Window/Transform", () => {
 
     expect(output).to.include("Project");
     expect(output).to.include("FactScan");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// METRIC DEPENDENCY ANALYSIS TESTS (Phase 4)
+// ---------------------------------------------------------------------------
+
+describe("Metric Dependency Analysis", () => {
+  describe("analyzeMetricDependencies", () => {
+    it("should find no dependencies in simple aggregate", () => {
+      const expr = {
+        kind: "Aggregate" as const,
+        op: "sum" as const,
+        input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact"),
+        distinct: false,
+        resultType: DataTypes.number,
+      };
+
+      const deps = analyzeMetricDependencies(expr);
+      expect(deps.size).to.equal(0);
+    });
+
+    it("should find metric reference dependencies", () => {
+      const expr = {
+        kind: "ScalarOp" as const,
+        op: "/" as const,
+        left: {
+          kind: "MetricRef" as const,
+          metricName: "totalSales",
+          baseFact: "fact_sales",
+          resultType: DataTypes.number,
+        },
+        right: {
+          kind: "MetricRef" as const,
+          metricName: "orderCount",
+          baseFact: "fact_sales",
+          resultType: DataTypes.number,
+        },
+        resultType: DataTypes.number,
+      };
+
+      const deps = analyzeMetricDependencies(expr);
+      expect(deps.size).to.equal(2);
+      expect(deps.has("totalSales")).to.be.true;
+      expect(deps.has("orderCount")).to.be.true;
+    });
+
+    it("should find dependencies in nested expressions", () => {
+      const expr = {
+        kind: "ScalarFunction" as const,
+        fn: "abs",
+        args: [
+          {
+            kind: "ScalarOp" as const,
+            op: "-" as const,
+            left: {
+              kind: "MetricRef" as const,
+              metricName: "currentSales",
+              baseFact: null,
+              resultType: DataTypes.number,
+            },
+            right: {
+              kind: "MetricRef" as const,
+              metricName: "lastYearSales",
+              baseFact: null,
+              resultType: DataTypes.number,
+            },
+            resultType: DataTypes.number,
+          },
+        ],
+        resultType: DataTypes.number,
+      };
+
+      const deps = analyzeMetricDependencies(expr);
+      expect(deps.size).to.equal(2);
+      expect(deps.has("currentSales")).to.be.true;
+      expect(deps.has("lastYearSales")).to.be.true;
+    });
+  });
+
+  describe("buildDependencyGraph", () => {
+    it("should build graph from metric expressions", () => {
+      const metricNames = ["totalSales", "orderCount", "avgTicket"];
+      const metricExprs = new Map<string, any>([
+        ["totalSales", {
+          kind: "Aggregate",
+          op: "sum",
+          input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact"),
+          distinct: false,
+          resultType: DataTypes.number,
+        }],
+        ["orderCount", {
+          kind: "Aggregate",
+          op: "count",
+          input: makeAttrRef("orderId", "fact_sales", "orderId", "fact"),
+          distinct: false,
+          resultType: DataTypes.number,
+        }],
+        ["avgTicket", {
+          kind: "ScalarOp",
+          op: "/",
+          left: { kind: "MetricRef", metricName: "totalSales", baseFact: null, resultType: DataTypes.number },
+          right: { kind: "MetricRef", metricName: "orderCount", baseFact: null, resultType: DataTypes.number },
+          resultType: DataTypes.number,
+        }],
+      ]);
+
+      const graph = buildDependencyGraph(metricNames, metricExprs);
+
+      expect(graph.get("totalSales")?.size).to.equal(0);
+      expect(graph.get("orderCount")?.size).to.equal(0);
+      expect(graph.get("avgTicket")?.size).to.equal(2);
+      expect(graph.get("avgTicket")?.has("totalSales")).to.be.true;
+      expect(graph.get("avgTicket")?.has("orderCount")).to.be.true;
+    });
+  });
+
+  describe("detectCycle", () => {
+    it("should return null for acyclic graph", () => {
+      const graph = new Map<string, Set<string>>([
+        ["a", new Set(["b", "c"])],
+        ["b", new Set(["c"])],
+        ["c", new Set()],
+      ]);
+
+      expect(detectCycle(graph)).to.be.null;
+    });
+
+    it("should detect simple cycle", () => {
+      const graph = new Map<string, Set<string>>([
+        ["a", new Set(["b"])],
+        ["b", new Set(["a"])],
+      ]);
+
+      const cycle = detectCycle(graph);
+      expect(cycle).to.not.be.null;
+      expect(cycle).to.include("a");
+      expect(cycle).to.include("b");
+    });
+
+    it("should detect longer cycle", () => {
+      const graph = new Map<string, Set<string>>([
+        ["a", new Set(["b"])],
+        ["b", new Set(["c"])],
+        ["c", new Set(["a"])],
+      ]);
+
+      const cycle = detectCycle(graph);
+      expect(cycle).to.not.be.null;
+      expect(cycle!.length).to.be.greaterThanOrEqual(3);
+    });
+
+    it("should detect self-reference cycle", () => {
+      const graph = new Map<string, Set<string>>([
+        ["a", new Set(["a"])],
+      ]);
+
+      const cycle = detectCycle(graph);
+      expect(cycle).to.not.be.null;
+    });
+  });
+
+  describe("topologicalSortMetrics", () => {
+    it("should sort metrics with no dependencies first", () => {
+      const metricNames = ["avgTicket", "totalSales", "orderCount"];
+      const graph = new Map<string, Set<string>>([
+        ["totalSales", new Set()],
+        ["orderCount", new Set()],
+        ["avgTicket", new Set(["totalSales", "orderCount"])],
+      ]);
+
+      const { order, phases } = topologicalSortMetrics(metricNames, graph);
+
+      expect(order.indexOf("totalSales")).to.be.lessThan(order.indexOf("avgTicket"));
+      expect(order.indexOf("orderCount")).to.be.lessThan(order.indexOf("avgTicket"));
+      expect(phases.get("totalSales")).to.equal(0);
+      expect(phases.get("orderCount")).to.equal(0);
+      expect(phases.get("avgTicket")).to.equal(1);
+    });
+
+    it("should handle multi-level dependencies", () => {
+      const metricNames = ["base", "derived1", "derived2"];
+      const graph = new Map<string, Set<string>>([
+        ["base", new Set()],
+        ["derived1", new Set(["base"])],
+        ["derived2", new Set(["derived1"])],
+      ]);
+
+      const { order, phases } = topologicalSortMetrics(metricNames, graph);
+
+      expect(order).to.deep.equal(["base", "derived1", "derived2"]);
+      expect(phases.get("base")).to.equal(0);
+      expect(phases.get("derived1")).to.equal(1);
+      expect(phases.get("derived2")).to.equal(2);
+    });
+
+    it("should throw MetricCycleError for circular dependencies", () => {
+      const metricNames = ["a", "b"];
+      const graph = new Map<string, Set<string>>([
+        ["a", new Set(["b"])],
+        ["b", new Set(["a"])],
+      ]);
+
+      expect(() => topologicalSortMetrics(metricNames, graph)).to.throw(MetricCycleError);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FILTER CLASSIFICATION TESTS (Phase 4)
+// ---------------------------------------------------------------------------
+
+describe("Filter Classification", () => {
+  describe("classifyFilter", () => {
+    it("should classify attribute-only filter as pre-aggregate", () => {
+      const predicate: any = {
+        kind: "Comparison",
+        left: makeAttrRef("storeId", "dim_store", "id", "dimension"),
+        op: "=",
+        right: { kind: "Constant", value: 1, dataType: DataTypes.number },
+        resultType: { kind: "boolean" },
+      };
+
+      const metricNames = new Set(["totalSales", "orderCount"]);
+      expect(classifyFilter(predicate, metricNames)).to.equal("pre");
+    });
+
+    it("should classify metric reference filter as post-aggregate", () => {
+      const predicate: any = {
+        kind: "Comparison",
+        left: { kind: "MetricRef", metricName: "totalSales", baseFact: null, resultType: DataTypes.number },
+        op: ">",
+        right: { kind: "Constant", value: 1000, dataType: DataTypes.number },
+        resultType: { kind: "boolean" },
+      };
+
+      const metricNames = new Set(["totalSales", "orderCount"]);
+      expect(classifyFilter(predicate, metricNames)).to.equal("post");
+    });
+
+    it("should classify aggregate function filter as post-aggregate", () => {
+      const predicate: any = {
+        kind: "Comparison",
+        left: {
+          kind: "Aggregate",
+          op: "sum",
+          input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact"),
+          distinct: false,
+          resultType: DataTypes.number,
+        },
+        op: ">",
+        right: { kind: "Constant", value: 500, dataType: DataTypes.number },
+        resultType: { kind: "boolean" },
+      };
+
+      const metricNames = new Set<string>();
+      expect(classifyFilter(predicate, metricNames)).to.equal("post");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BUILD LOGICAL PLAN TESTS (Phase 4)
+// ---------------------------------------------------------------------------
+
+describe("buildLogicalPlan", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  it("should build plan for simple aggregate query", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+
+    expect(plan.rootNodeId).to.not.be.null;
+    expect(plan.outputGrain.dimensions).to.have.lengthOf(1);
+    expect(plan.outputGrain.dimensions[0].attributeId).to.equal("storeName");
+    expect(plan.outputMetrics).to.have.lengthOf(1);
+    expect(plan.outputMetrics[0].name).to.equal("totalSales");
+    expect(plan.metricEvalOrder).to.deep.equal(["totalSales"]);
+  });
+
+  it("should compute correct execution phases for derived metrics", () => {
+    // Add derived metric to model using proper builders
+    const extendedModel: SemanticModel = {
+      ...model,
+      metrics: {
+        ...model.metrics,
+        orderCount: aggregateMetric("orderCount", "fact_sales", "salesAmount", "count"),
+        avgTicket: buildMetricFromExpr({
+          name: "avgTicket",
+          baseFact: "fact_sales",
+          expr: Expr.div(Expr.metric("totalSales"), Expr.metric("orderCount")),
+        }),
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales", "orderCount", "avgTicket"],
+    };
+
+    const plan = buildLogicalPlan(query, extendedModel);
+
+    // Base metrics should be phase 0, derived should be phase 1
+    const totalSalesPlan = plan.outputMetrics.find((m) => m.name === "totalSales");
+    const orderCountPlan = plan.outputMetrics.find((m) => m.name === "orderCount");
+    const avgTicketPlan = plan.outputMetrics.find((m) => m.name === "avgTicket");
+
+    expect(totalSalesPlan?.executionPhase).to.equal(0);
+    expect(orderCountPlan?.executionPhase).to.equal(0);
+    expect(avgTicketPlan?.executionPhase).to.equal(1);
+  });
+
+  it("should include aggregate nodes in plan", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+
+    const aggNodes = [...plan.nodes.values()].filter((n) => n.kind === "Aggregate");
+    expect(aggNodes.length).to.be.greaterThan(0);
+  });
+
+  it("should build join plan for multi-table queries", () => {
+    const query = {
+      dimensions: ["storeName", "weekName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+
+    const joinNodes = [...plan.nodes.values()].filter((n) => n.kind === "Join");
+    expect(joinNodes.length).to.be.greaterThanOrEqual(1);
+  });
+
+  it("should throw for unknown metric", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["unknownMetric"],
+    };
+
+    expect(() => buildLogicalPlan(query, model)).to.throw("Unknown metric");
+  });
+
+  it("should throw for circular metric dependencies", () => {
+    const circularModel: SemanticModel = {
+      ...model,
+      metrics: {
+        metricA: buildMetricFromExpr({
+          name: "metricA",
+          baseFact: "fact_sales",
+          expr: Expr.add(Expr.metric("metricB"), Expr.lit(1)),
+        }),
+        metricB: buildMetricFromExpr({
+          name: "metricB",
+          baseFact: "fact_sales",
+          expr: Expr.add(Expr.metric("metricA"), Expr.lit(1)),
+        }),
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["metricA", "metricB"],
+    };
+
+    expect(() => buildLogicalPlan(query, circularModel)).to.throw(MetricCycleError);
+  });
+
+  it("should compute correct grainId", () => {
+    const query = {
+      dimensions: ["weekName", "storeName"], // Note: unsorted
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+
+    // grainId should be sorted alphabetically
+    expect(plan.outputGrain.grainId).to.equal("storeName,weekName");
+  });
+
+  it("should collect required attributes from metrics", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+
+    const totalSalesPlan = plan.outputMetrics.find((m) => m.name === "totalSales");
+    expect(totalSalesPlan?.requiredAttrs.length).to.be.greaterThan(0);
   });
 });
