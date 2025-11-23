@@ -146,9 +146,16 @@ type LogicalExpr =
   | LogicalBetween
   | LogicalIsNull;
 
-// Type guard for predicates (boolean expressions)
+// Type alias for predicates (boolean expressions)
 type LogicalPredicate = LogicalExpr & { resultType: { kind: "boolean" } };
+
+// Type guard for runtime checking
+function isLogicalPredicate(expr: LogicalExpr): expr is LogicalPredicate {
+  return expr.resultType?.kind === "boolean";
+}
 ```
+
+> **Implementation note**: The `LogicalPredicate` type alias documents intent but TypeScript can't fully enforce it at compile time (it's an intersection with a union). Use the `isLogicalPredicate` type guard in validators/transformers to enforce boolean-only where required.
 
 ### Node Definitions
 
@@ -232,11 +239,12 @@ interface LogicalAggregate {
   op: "sum" | "avg" | "count" | "min" | "max" | "count_distinct";
   input: LogicalExpr;          // What to aggregate (usually an AttributeRef)
   distinct: boolean;
-  filter?: LogicalExpr;        // Optional aggregate filter (WHERE in aggregate)
-  sourceTable: string;         // Which fact table
+  filter?: LogicalPredicate;   // Optional aggregate filter (WHERE in aggregate)
   resultType: DataType;
 }
 ```
+
+> **Design note**: `sourceTable` is intentionally omitted. The plan already knows which facts feed the aggregate via the input node chain. In multi-fact or transform scenarios, "one aggregate = one fact" doesn't hold cleanly. The plan is the source of truth for data lineage.
 
 #### LogicalScalarOp
 
@@ -313,10 +321,16 @@ interface LogicalComparison {
 interface LogicalLogicalOp {
   kind: "LogicalOp";
   op: "and" | "or" | "not";
-  operands: LogicalExpr[];     // 2 for and/or, 1 for not
+  operands: LogicalPredicate[];  // Must be boolean-typed expressions
   resultType: { kind: "boolean" };
 }
 ```
+
+> **Enforcement**: Validators must check operand counts:
+> - `"not"`: exactly 1 operand
+> - `"and"` / `"or"`: 2 or more operands
+>
+> We keep a single node kind for simplicity; an alternative would be three distinct types (`LogicalAnd`, `LogicalOr`, `LogicalNot`).
 
 #### LogicalInList
 
@@ -393,7 +407,7 @@ interface FactScanNode extends BasePlanNode {
   kind: "FactScan";
   tableName: string;
   requiredColumns: LogicalAttributeRef[];
-  inlineFilters: LogicalExpr[];  // Filters pushable to scan
+  inlineFilters: LogicalPredicate[];  // Filters pushable to scan (must be boolean)
 }
 ```
 
@@ -406,7 +420,7 @@ interface DimensionScanNode extends BasePlanNode {
   kind: "DimensionScan";
   tableName: string;
   requiredColumns: LogicalAttributeRef[];
-  inlineFilters: LogicalExpr[];
+  inlineFilters: LogicalPredicate[];  // Filters pushable to scan (must be boolean)
 }
 ```
 
@@ -438,7 +452,7 @@ Applies a filter predicate.
 interface FilterNode extends BasePlanNode {
   kind: "Filter";
   inputId: PlanNodeId;
-  predicate: LogicalExpr;      // Boolean-typed expression
+  predicate: LogicalPredicate;  // Must be boolean-typed expression
 }
 ```
 
@@ -463,6 +477,8 @@ interface AggregateNode extends BasePlanNode {
 Applies window functions. **This is where windows live** - in the plan, not in expressions.
 
 ```typescript
+type AggregationOperator = "sum" | "avg" | "count" | "min" | "max" | "count_distinct";
+
 interface WindowNode extends BasePlanNode {
   kind: "Window";
   inputId: PlanNodeId;
@@ -474,11 +490,13 @@ interface WindowNode extends BasePlanNode {
   frame: WindowFrameSpec;
   windowFunctions: Array<{
     outputName: string;
-    aggregate: AggregationOperator;
+    op: AggregationOperator;   // Same enum as LogicalAggregate.op
     input: LogicalExpr;
   }>;
 }
 ```
+
+> **Design note**: `windowFunctions[].op` uses the same `AggregationOperator` enum as `LogicalAggregate.op` to avoid duplication. Future window-specific functions (e.g., `row_number`, `rank`) can extend this.
 
 #### TransformNode
 
@@ -490,11 +508,18 @@ interface TransformNode extends BasePlanNode {
   inputId: PlanNodeId;
   transformKind: "rowset" | "table";
   transformId: string;
-  transformDef: RowsetTransformDefinition | TableTransformDefinition;
+  transformDef?: RowsetTransformDefinition | TableTransformDefinition;  // Optional: can lookup from registry
   inputAttr: LogicalAttributeRef;
   outputAttr: LogicalAttributeRef;
 }
 ```
+
+> **Design note**: `transformDef` is optional. Transforms are typically defined in a catalog/semantic model, so the plan can store just `transformId` and look up the definition at compile/execution time. Inlining the definition is useful for:
+> - Portable/serialized plans
+> - Plans that need to be self-contained
+> - Debugging/EXPLAIN output
+>
+> For most cases, `transformId` + registry lookup is sufficient.
 
 #### ProjectNode
 
@@ -537,6 +562,13 @@ interface LogicalQueryPlan {
   estimatedCost?: number;
 }
 ```
+
+> **Semantics of `rootNodeId`**: Points to the final rowset operation before metric projection. Typically this is:
+> - An `AggregateNode` for standard queries (fact + dimensions → grouped aggregates)
+> - A `WindowNode` if the query includes window functions applied after aggregation
+> - A `ProjectNode` if explicit column selection/computation is needed
+>
+> The root node's output schema defines the available columns for metric evaluation. Derived metrics (`executionPhase > 0`) are computed over the root node's output.
 
 ### Supporting Types
 
@@ -635,6 +667,79 @@ function explainPlan(plan: LogicalQueryPlan): string;
  */
 function compileLogicalPlan(plan: LogicalQueryPlan): CompiledQuery;
 ```
+
+---
+
+## Part 6: API Layering & Migration
+
+### Public API (Unchanged)
+
+The existing public API remains unchanged:
+
+```typescript
+// Today's public API - no changes required
+function runSemanticQuery(
+  env: SemanticEnv,
+  spec: QuerySpecV2,
+  options?: QueryOptions
+): Row[];
+```
+
+### Internal Implementation (After Migration)
+
+Internally, `runSemanticQuery` will build the logical plan first:
+
+```typescript
+function runSemanticQuery(
+  env: SemanticEnv,
+  spec: QuerySpecV2,
+  options?: QueryOptions
+): Row[] {
+  // 1. Build logical plan (new)
+  const plan = buildLogicalPlan(spec, env.model);
+
+  // 2. Optional: EXPLAIN mode
+  if (options?.explain) {
+    console.log(explainPlan(plan));
+  }
+
+  // 3. Compile and execute
+  const compiled = compileLogicalPlan(plan);
+  return compiled.execute(env.db);
+}
+```
+
+### Lower-Level Hooks (For Advanced Users)
+
+For users who want direct access to the IR:
+
+```typescript
+// Build plan without executing (for inspection/optimization)
+function buildLogicalPlan(
+  spec: QuerySpecV2,
+  model: SemanticModel
+): LogicalQueryPlan;
+
+// Compile a single metric expression (existing API, internally uses IR)
+function compileMetricExpr(expr: MetricExpr): MetricEvalV2;
+
+// New: compile from logical expression directly
+function compileLogicalExpr(expr: LogicalExpr): MetricEvalV2;
+```
+
+### Migration Path
+
+| Phase | Public API | Internal Path |
+|-------|------------|---------------|
+| **Today** | `runSemanticQuery()` | `MetricExpr` → `compileMetricExpr()` → `MetricEval` |
+| **After Phase 1** | `runSemanticQuery()` | `MetricExpr` → `LogicalExpr` → `compileLogicalExpr()` → `MetricEval` |
+| **After Phase 5** | `runSemanticQuery()` | `QuerySpec` → `LogicalQueryPlan` → `compileLogicalPlan()` → Execute |
+
+### Backward Compatibility
+
+- `compileMetricExpr(expr: MetricExpr)` continues to work
+- Internally: `MetricExpr` → `syntaxToLogical()` → `LogicalExpr` → `compileLogicalExpr()`
+- Users can opt-in to the new API (`buildLogicalPlan`, `explainPlan`) as needed
 
 ---
 
