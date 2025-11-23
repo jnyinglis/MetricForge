@@ -29,6 +29,9 @@ import {
   JoinNode,
   FilterNode,
   AggregateNode,
+  WindowNode,
+  TransformNode,
+  ProjectNode,
   LogicalQueryPlan,
   LogicalMetricPlan,
   ResolvedGrain,
@@ -36,9 +39,15 @@ import {
   LogicalPredicate,
   LogicalExpr,
   LogicalAggregate,
+  AggregationOperator,
   DataTypes,
   computeGrainId,
 } from "./logicalAst";
+import type {
+  WindowFrameSpec,
+  RowsetTransformDefinition,
+  TableTransformDefinition,
+} from "./semanticEngine";
 import { syntaxToLogical, collectAttributeRefs, collectMetricRefs } from "./syntaxToLogical";
 
 // ---------------------------------------------------------------------------
@@ -296,6 +305,192 @@ export function createAggregate(
 }
 
 // ---------------------------------------------------------------------------
+// WINDOW NODE BUILDERS
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a window node.
+ * Window functions operate on partitions of rows with optional ordering.
+ */
+export function createWindow(
+  inputId: PlanNodeId,
+  partitionBy: LogicalAttributeRef[],
+  orderBy: Array<{ attr: LogicalAttributeRef; direction: "asc" | "desc" }>,
+  frame: WindowFrameSpec,
+  windowFunctions: Array<{
+    outputName: string;
+    op: AggregationOperator;
+    input: LogicalExpr;
+  }>
+): WindowNode {
+  return {
+    id: generateNodeId("window"),
+    kind: "Window",
+    inputId,
+    partitionBy,
+    orderBy,
+    frame,
+    windowFunctions,
+  };
+}
+
+/**
+ * Create a simple rolling window node.
+ */
+export function createRollingWindow(
+  inputId: PlanNodeId,
+  partitionBy: LogicalAttributeRef[],
+  orderBy: LogicalAttributeRef,
+  count: number,
+  windowFunctions: Array<{
+    outputName: string;
+    op: AggregationOperator;
+    input: LogicalExpr;
+  }>
+): WindowNode {
+  return createWindow(
+    inputId,
+    partitionBy,
+    [{ attr: orderBy, direction: "asc" }],
+    { kind: "rolling", count },
+    windowFunctions
+  );
+}
+
+/**
+ * Create a cumulative window node.
+ */
+export function createCumulativeWindow(
+  inputId: PlanNodeId,
+  partitionBy: LogicalAttributeRef[],
+  orderBy: LogicalAttributeRef,
+  windowFunctions: Array<{
+    outputName: string;
+    op: AggregationOperator;
+    input: LogicalExpr;
+  }>
+): WindowNode {
+  return createWindow(
+    inputId,
+    partitionBy,
+    [{ attr: orderBy, direction: "asc" }],
+    { kind: "cumulative" },
+    windowFunctions
+  );
+}
+
+/**
+ * Create an offset window node (e.g., LAG/LEAD).
+ */
+export function createOffsetWindow(
+  inputId: PlanNodeId,
+  partitionBy: LogicalAttributeRef[],
+  orderBy: LogicalAttributeRef,
+  offset: number,
+  windowFunctions: Array<{
+    outputName: string;
+    op: AggregationOperator;
+    input: LogicalExpr;
+  }>
+): WindowNode {
+  return createWindow(
+    inputId,
+    partitionBy,
+    [{ attr: orderBy, direction: "asc" }],
+    { kind: "offset", offset },
+    windowFunctions
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TRANSFORM NODE BUILDERS
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a transform node.
+ * Transforms apply rowset or table-based mappings to the data.
+ */
+export function createTransform(
+  inputId: PlanNodeId,
+  transformKind: "rowset" | "table",
+  transformId: string,
+  inputAttr: LogicalAttributeRef,
+  outputAttr: LogicalAttributeRef,
+  transformDef?: RowsetTransformDefinition | TableTransformDefinition
+): TransformNode {
+  return {
+    id: generateNodeId("transform"),
+    kind: "Transform",
+    inputId,
+    transformKind,
+    transformId,
+    inputAttr,
+    outputAttr,
+    transformDef,
+  };
+}
+
+/**
+ * Create a table transform node (e.g., week-to-week mapping).
+ */
+export function createTableTransform(
+  inputId: PlanNodeId,
+  transformId: string,
+  inputAttr: LogicalAttributeRef,
+  outputAttr: LogicalAttributeRef,
+  transformDef?: TableTransformDefinition
+): TransformNode {
+  return createTransform(
+    inputId,
+    "table",
+    transformId,
+    inputAttr,
+    outputAttr,
+    transformDef
+  );
+}
+
+/**
+ * Create a rowset transform node (e.g., last_year).
+ */
+export function createRowsetTransform(
+  inputId: PlanNodeId,
+  transformId: string,
+  inputAttr: LogicalAttributeRef,
+  outputAttr: LogicalAttributeRef,
+  transformDef?: RowsetTransformDefinition
+): TransformNode {
+  return createTransform(
+    inputId,
+    "rowset",
+    transformId,
+    inputAttr,
+    outputAttr,
+    transformDef
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PROJECT NODE BUILDERS
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a project node.
+ * Projects select and compute output columns.
+ */
+export function createProject(
+  inputId: PlanNodeId,
+  outputs: Array<{ name: string; expr: LogicalExpr }>
+): ProjectNode {
+  return {
+    id: generateNodeId("project"),
+    kind: "Project",
+    inputId,
+    outputs,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ATTRIBUTE RESOLUTION
 // ---------------------------------------------------------------------------
 
@@ -407,6 +602,210 @@ export function inferJoinPath(
   }
 
   return joinableDimensions;
+}
+
+// ---------------------------------------------------------------------------
+// WINDOW/TRANSFORM EXTRACTION FROM METRICEXPR
+// ---------------------------------------------------------------------------
+
+import type { MetricExpr } from "./semanticEngine";
+
+/**
+ * Information extracted from a Window MetricExpr node.
+ */
+export interface ExtractedWindowInfo {
+  kind: "window";
+  partitionBy: string[];
+  orderBy: string;
+  frame: WindowFrameSpec;
+  aggregate: AggregationOperator;
+  baseExpr: MetricExpr;
+}
+
+/**
+ * Information extracted from a Transform MetricExpr node.
+ */
+export interface ExtractedTransformInfo {
+  kind: "transform";
+  transformId: string;
+  transformKind: "rowset" | "table";
+  inputAttr?: string;
+  outputAttr?: string;
+  baseExpr: MetricExpr;
+}
+
+/**
+ * Check if a MetricExpr contains a Window node at the top level.
+ */
+export function isWindowExpr(expr: MetricExpr): expr is Extract<MetricExpr, { kind: "Window" }> {
+  return expr.kind === "Window";
+}
+
+/**
+ * Check if a MetricExpr contains a Transform node at the top level.
+ */
+export function isTransformExpr(expr: MetricExpr): expr is Extract<MetricExpr, { kind: "Transform" }> {
+  return expr.kind === "Transform";
+}
+
+/**
+ * Extract Window information from a MetricExpr.
+ * Returns null if the expression is not a Window.
+ */
+export function extractWindowInfo(expr: MetricExpr): ExtractedWindowInfo | null {
+  if (!isWindowExpr(expr)) {
+    return null;
+  }
+
+  // Map the syntax AST aggregate operator to our AggregationOperator
+  const aggregate = expr.aggregate as AggregationOperator;
+
+  return {
+    kind: "window",
+    partitionBy: expr.partitionBy,
+    orderBy: expr.orderBy,
+    frame: expr.frame,
+    aggregate,
+    baseExpr: expr.base,
+  };
+}
+
+/**
+ * Extract Transform information from a MetricExpr.
+ * Returns null if the expression is not a Transform.
+ */
+export function extractTransformInfo(expr: MetricExpr): ExtractedTransformInfo | null {
+  if (!isTransformExpr(expr)) {
+    return null;
+  }
+
+  return {
+    kind: "transform",
+    transformId: expr.transformId,
+    transformKind: expr.transformKind,
+    inputAttr: expr.inputAttr,
+    outputAttr: expr.outputAttr,
+    baseExpr: expr.base,
+  };
+}
+
+/**
+ * Recursively find all Window nodes in a MetricExpr tree.
+ */
+export function findWindowExprs(expr: MetricExpr): Array<Extract<MetricExpr, { kind: "Window" }>> {
+  const results: Array<Extract<MetricExpr, { kind: "Window" }>> = [];
+
+  function walk(e: MetricExpr): void {
+    if (e.kind === "Window") {
+      results.push(e);
+      walk(e.base);
+    } else if (e.kind === "Transform") {
+      walk(e.base);
+    } else if (e.kind === "BinaryOp") {
+      walk(e.left);
+      walk(e.right);
+    } else if (e.kind === "Call") {
+      e.args.forEach(walk);
+    }
+    // Literal, AttrRef, MetricRef are leaf nodes
+  }
+
+  walk(expr);
+  return results;
+}
+
+/**
+ * Recursively find all Transform nodes in a MetricExpr tree.
+ */
+export function findTransformExprs(expr: MetricExpr): Array<Extract<MetricExpr, { kind: "Transform" }>> {
+  const results: Array<Extract<MetricExpr, { kind: "Transform" }>> = [];
+
+  function walk(e: MetricExpr): void {
+    if (e.kind === "Transform") {
+      results.push(e);
+      walk(e.base);
+    } else if (e.kind === "Window") {
+      walk(e.base);
+    } else if (e.kind === "BinaryOp") {
+      walk(e.left);
+      walk(e.right);
+    } else if (e.kind === "Call") {
+      e.args.forEach(walk);
+    }
+    // Literal, AttrRef, MetricRef are leaf nodes
+  }
+
+  walk(expr);
+  return results;
+}
+
+/**
+ * Convert extracted Window info to a WindowNode in the plan.
+ */
+export function windowInfoToPlanNode(
+  info: ExtractedWindowInfo,
+  inputId: PlanNodeId,
+  model: SemanticModel,
+  outputName: string
+): WindowNode {
+  // Resolve partition and order attributes
+  const partitionBy = info.partitionBy
+    .map((attr) => resolveAttributeRef(attr, model))
+    .filter((ref): ref is LogicalAttributeRef => ref !== null);
+
+  const orderByRef = resolveAttributeRef(info.orderBy, model);
+  const orderBy = orderByRef ? [{ attr: orderByRef, direction: "asc" as const }] : [];
+
+  // For now, create a simple window function that references the base
+  // The actual input expression will be determined during full plan building
+  return createWindow(inputId, partitionBy, orderBy, info.frame, [
+    {
+      outputName,
+      op: info.aggregate,
+      input: { kind: "Constant", value: 0, dataType: DataTypes.number }, // Placeholder
+    },
+  ]);
+}
+
+/**
+ * Convert extracted Transform info to a TransformNode in the plan.
+ */
+export function transformInfoToPlanNode(
+  info: ExtractedTransformInfo,
+  inputId: PlanNodeId,
+  model: SemanticModel
+): TransformNode | null {
+  // Resolve input and output attributes
+  const inputAttrName = info.inputAttr;
+  const outputAttrName = info.outputAttr;
+
+  if (!inputAttrName || !outputAttrName) {
+    return null;
+  }
+
+  const inputAttr = resolveAttributeRef(inputAttrName, model);
+  const outputAttr = resolveAttributeRef(outputAttrName, model);
+
+  if (!inputAttr || !outputAttr) {
+    return null;
+  }
+
+  // Look up transform definition if available
+  let transformDef: RowsetTransformDefinition | TableTransformDefinition | undefined;
+  if (info.transformKind === "table" && model.tableTransforms) {
+    transformDef = model.tableTransforms[info.transformId];
+  } else if (info.transformKind === "rowset" && model.rowsetTransforms) {
+    transformDef = model.rowsetTransforms[info.transformId];
+  }
+
+  return createTransform(
+    inputId,
+    info.transformKind,
+    info.transformId,
+    inputAttr,
+    outputAttr,
+    transformDef
+  );
 }
 
 // ---------------------------------------------------------------------------

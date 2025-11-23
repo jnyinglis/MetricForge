@@ -3,6 +3,7 @@ import {
   LogicalAttribute,
   MetricDefinition,
   SemanticModel,
+  MetricExpr,
   aggregateMetric,
 } from "../src/semanticEngine";
 import {
@@ -23,6 +24,14 @@ import {
   createJoin,
   createFilter,
   createAggregate,
+  createWindow,
+  createRollingWindow,
+  createCumulativeWindow,
+  createOffsetWindow,
+  createTransform,
+  createTableTransform,
+  createRowsetTransform,
+  createProject,
   inferJoinKeys,
   resolveAttributeRef,
   resolveAttributeRefs,
@@ -33,6 +42,14 @@ import {
   formatPlanDag,
   assemblePlan,
   createResolvedGrain,
+  isWindowExpr,
+  isTransformExpr,
+  extractWindowInfo,
+  extractTransformInfo,
+  findWindowExprs,
+  findTransformExprs,
+  windowInfoToPlanNode,
+  transformInfoToPlanNode,
 } from "../src/planBuilder";
 
 // ---------------------------------------------------------------------------
@@ -634,5 +651,591 @@ describe("Plan Assembly", () => {
         "no root node set"
       );
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOW NODE BUILDER TESTS
+// ---------------------------------------------------------------------------
+
+describe("Window Node Builders", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  describe("createWindow", () => {
+    it("should create window node with partition and order", () => {
+      const partitionBy = [makeAttrRef("storeId", "fact_sales", "storeId", "fact")];
+      const orderBy = [{ attr: makeAttrRef("weekId", "dim_week", "id", "dimension"), direction: "asc" as const }];
+      const windowFunctions = [{
+        outputName: "rolling_sum",
+        op: "sum" as const,
+        input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact"),
+      }];
+
+      const node = createWindow("input_1", partitionBy, orderBy, { kind: "rolling", count: 3 }, windowFunctions);
+
+      expect(node.kind).to.equal("Window");
+      expect(node.inputId).to.equal("input_1");
+      expect(node.partitionBy).to.have.lengthOf(1);
+      expect(node.orderBy).to.have.lengthOf(1);
+      expect(node.frame.kind).to.equal("rolling");
+      expect((node.frame as any).count).to.equal(3);
+      expect(node.windowFunctions).to.have.lengthOf(1);
+      expect(node.id).to.match(/^window_/);
+    });
+
+    it("should create window with cumulative frame", () => {
+      const node = createWindow("input_1", [], [], { kind: "cumulative" }, []);
+
+      expect(node.frame.kind).to.equal("cumulative");
+    });
+
+    it("should create window with offset frame", () => {
+      const node = createWindow("input_1", [], [], { kind: "offset", offset: -1 }, []);
+
+      expect(node.frame.kind).to.equal("offset");
+      expect((node.frame as any).offset).to.equal(-1);
+    });
+  });
+
+  describe("createRollingWindow", () => {
+    it("should create rolling window with count", () => {
+      const partitionBy = [makeAttrRef("storeId", "fact_sales", "storeId", "fact")];
+      const orderBy = makeAttrRef("weekId", "dim_week", "id", "dimension");
+      const windowFunctions = [{
+        outputName: "rolling_avg",
+        op: "avg" as const,
+        input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact"),
+      }];
+
+      const node = createRollingWindow("input_1", partitionBy, orderBy, 7, windowFunctions);
+
+      expect(node.kind).to.equal("Window");
+      expect(node.frame.kind).to.equal("rolling");
+      expect((node.frame as any).count).to.equal(7);
+      expect(node.orderBy).to.have.lengthOf(1);
+      expect(node.orderBy[0].direction).to.equal("asc");
+    });
+  });
+
+  describe("createCumulativeWindow", () => {
+    it("should create cumulative window", () => {
+      const partitionBy = [makeAttrRef("storeId", "fact_sales", "storeId", "fact")];
+      const orderBy = makeAttrRef("weekId", "dim_week", "id", "dimension");
+
+      const node = createCumulativeWindow("input_1", partitionBy, orderBy, []);
+
+      expect(node.frame.kind).to.equal("cumulative");
+    });
+  });
+
+  describe("createOffsetWindow", () => {
+    it("should create offset window (e.g., LAG)", () => {
+      const partitionBy = [makeAttrRef("storeId", "fact_sales", "storeId", "fact")];
+      const orderBy = makeAttrRef("weekId", "dim_week", "id", "dimension");
+
+      const node = createOffsetWindow("input_1", partitionBy, orderBy, -1, []);
+
+      expect(node.frame.kind).to.equal("offset");
+      expect((node.frame as any).offset).to.equal(-1);
+    });
+
+    it("should create offset window for LEAD", () => {
+      const orderBy = makeAttrRef("weekId", "dim_week", "id", "dimension");
+      const node = createOffsetWindow("input_1", [], orderBy, 1, []);
+
+      expect((node.frame as any).offset).to.equal(1);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TRANSFORM NODE BUILDER TESTS
+// ---------------------------------------------------------------------------
+
+describe("Transform Node Builders", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  describe("createTransform", () => {
+    it("should create table transform node", () => {
+      const inputAttr = makeAttrRef("weekId", "fact_sales", "weekId", "fact");
+      const outputAttr = makeAttrRef("lyWeekId", "dim_week", "ly_week_id", "dimension");
+
+      const node = createTransform("input_1", "table", "week_to_ly_week", inputAttr, outputAttr);
+
+      expect(node.kind).to.equal("Transform");
+      expect(node.inputId).to.equal("input_1");
+      expect(node.transformKind).to.equal("table");
+      expect(node.transformId).to.equal("week_to_ly_week");
+      expect(node.inputAttr.attributeId).to.equal("weekId");
+      expect(node.outputAttr.attributeId).to.equal("lyWeekId");
+      expect(node.id).to.match(/^transform_/);
+    });
+
+    it("should create rowset transform node", () => {
+      const inputAttr = makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact");
+      const outputAttr = makeAttrRef("lySalesAmount", "fact_sales", "ly_sales_amount", "fact");
+
+      const node = createTransform("input_1", "rowset", "last_year", inputAttr, outputAttr);
+
+      expect(node.transformKind).to.equal("rowset");
+      expect(node.transformId).to.equal("last_year");
+    });
+
+    it("should include transform definition when provided", () => {
+      const inputAttr = makeAttrRef("weekId", "fact_sales", "weekId", "fact");
+      const outputAttr = makeAttrRef("lyWeekId", "dim_week", "ly_week_id", "dimension");
+      const transformDef = { kind: "table" as const, sourceAttr: "weekId", lookupTable: "dim_week_mapping" };
+
+      const node = createTransform("input_1", "table", "week_mapping", inputAttr, outputAttr, transformDef as any);
+
+      expect(node.transformDef).to.deep.equal(transformDef);
+    });
+  });
+
+  describe("createTableTransform", () => {
+    it("should create table transform shorthand", () => {
+      const inputAttr = makeAttrRef("weekId", "fact_sales", "weekId", "fact");
+      const outputAttr = makeAttrRef("lyWeekId", "dim_week", "ly_week_id", "dimension");
+
+      const node = createTableTransform("input_1", "week_to_ly", inputAttr, outputAttr);
+
+      expect(node.transformKind).to.equal("table");
+      expect(node.transformId).to.equal("week_to_ly");
+    });
+  });
+
+  describe("createRowsetTransform", () => {
+    it("should create rowset transform shorthand", () => {
+      const inputAttr = makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact");
+      const outputAttr = makeAttrRef("lySales", "fact_sales", "ly_sales", "fact");
+
+      const node = createRowsetTransform("input_1", "last_year", inputAttr, outputAttr);
+
+      expect(node.transformKind).to.equal("rowset");
+      expect(node.transformId).to.equal("last_year");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PROJECT NODE BUILDER TESTS
+// ---------------------------------------------------------------------------
+
+describe("Project Node Builder", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  describe("createProject", () => {
+    it("should create project node with outputs", () => {
+      const outputs = [
+        { name: "total_sales", expr: { kind: "Constant" as const, value: 100, dataType: DataTypes.number } },
+        { name: "store_name", expr: makeAttrRef("storeName", "dim_store", "name", "dimension") },
+      ];
+
+      const node = createProject("input_1", outputs);
+
+      expect(node.kind).to.equal("Project");
+      expect(node.inputId).to.equal("input_1");
+      expect(node.outputs).to.have.lengthOf(2);
+      expect(node.outputs[0].name).to.equal("total_sales");
+      expect(node.outputs[1].name).to.equal("store_name");
+      expect(node.id).to.match(/^project_/);
+    });
+
+    it("should create empty project node", () => {
+      const node = createProject("input_1", []);
+
+      expect(node.outputs).to.be.empty;
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOW/TRANSFORM EXTRACTION TESTS
+// ---------------------------------------------------------------------------
+
+describe("Window/Transform Extraction", () => {
+  describe("isWindowExpr", () => {
+    it("should return true for Window expression", () => {
+      const expr: MetricExpr = {
+        kind: "Window",
+        base: { kind: "AttrRef", name: "salesAmount" },
+        partitionBy: ["storeId"],
+        orderBy: "weekId",
+        frame: { kind: "rolling", count: 3 },
+        aggregate: "sum",
+      };
+
+      expect(isWindowExpr(expr)).to.be.true;
+    });
+
+    it("should return false for non-Window expression", () => {
+      const expr: MetricExpr = { kind: "AttrRef", name: "salesAmount" };
+      expect(isWindowExpr(expr)).to.be.false;
+    });
+  });
+
+  describe("isTransformExpr", () => {
+    it("should return true for Transform expression", () => {
+      const expr: MetricExpr = {
+        kind: "Transform",
+        base: { kind: "MetricRef", name: "totalSales" },
+        transformId: "last_year",
+        transformKind: "table",
+      };
+
+      expect(isTransformExpr(expr)).to.be.true;
+    });
+
+    it("should return false for non-Transform expression", () => {
+      const expr: MetricExpr = { kind: "Literal", value: 42 };
+      expect(isTransformExpr(expr)).to.be.false;
+    });
+  });
+
+  describe("extractWindowInfo", () => {
+    it("should extract window info from Window expression", () => {
+      const expr: MetricExpr = {
+        kind: "Window",
+        base: { kind: "AttrRef", name: "salesAmount" },
+        partitionBy: ["storeId", "regionId"],
+        orderBy: "weekId",
+        frame: { kind: "cumulative" },
+        aggregate: "avg",
+      };
+
+      const info = extractWindowInfo(expr);
+
+      expect(info).to.not.be.null;
+      expect(info!.kind).to.equal("window");
+      expect(info!.partitionBy).to.deep.equal(["storeId", "regionId"]);
+      expect(info!.orderBy).to.equal("weekId");
+      expect(info!.frame.kind).to.equal("cumulative");
+      expect(info!.aggregate).to.equal("avg");
+      expect(info!.baseExpr.kind).to.equal("AttrRef");
+    });
+
+    it("should return null for non-Window expression", () => {
+      const expr: MetricExpr = { kind: "Literal", value: 100 };
+      expect(extractWindowInfo(expr)).to.be.null;
+    });
+  });
+
+  describe("extractTransformInfo", () => {
+    it("should extract transform info from Transform expression", () => {
+      const expr: MetricExpr = {
+        kind: "Transform",
+        base: { kind: "MetricRef", name: "totalSales" },
+        transformId: "last_year",
+        transformKind: "table",
+        inputAttr: "weekId",
+        outputAttr: "lyWeekId",
+      };
+
+      const info = extractTransformInfo(expr);
+
+      expect(info).to.not.be.null;
+      expect(info!.kind).to.equal("transform");
+      expect(info!.transformId).to.equal("last_year");
+      expect(info!.transformKind).to.equal("table");
+      expect(info!.inputAttr).to.equal("weekId");
+      expect(info!.outputAttr).to.equal("lyWeekId");
+      expect(info!.baseExpr.kind).to.equal("MetricRef");
+    });
+
+    it("should return null for non-Transform expression", () => {
+      const expr: MetricExpr = { kind: "AttrRef", name: "salesAmount" };
+      expect(extractTransformInfo(expr)).to.be.null;
+    });
+  });
+
+  describe("findWindowExprs", () => {
+    it("should find all Window expressions in tree", () => {
+      const expr: MetricExpr = {
+        kind: "BinaryOp",
+        op: "+",
+        left: {
+          kind: "Window",
+          base: { kind: "AttrRef", name: "salesAmount" },
+          partitionBy: ["storeId"],
+          orderBy: "weekId",
+          frame: { kind: "rolling", count: 3 },
+          aggregate: "sum",
+        },
+        right: {
+          kind: "Window",
+          base: { kind: "AttrRef", name: "quantity" },
+          partitionBy: ["storeId"],
+          orderBy: "weekId",
+          frame: { kind: "cumulative" },
+          aggregate: "avg",
+        },
+      };
+
+      const windows = findWindowExprs(expr);
+
+      expect(windows).to.have.lengthOf(2);
+      expect(windows[0].aggregate).to.equal("sum");
+      expect(windows[1].aggregate).to.equal("avg");
+    });
+
+    it("should find nested Window expressions", () => {
+      const expr: MetricExpr = {
+        kind: "Window",
+        base: {
+          kind: "Window",
+          base: { kind: "AttrRef", name: "salesAmount" },
+          partitionBy: ["storeId"],
+          orderBy: "weekId",
+          frame: { kind: "rolling", count: 3 },
+          aggregate: "sum",
+        },
+        partitionBy: ["regionId"],
+        orderBy: "monthId",
+        frame: { kind: "cumulative" },
+        aggregate: "avg",
+      };
+
+      const windows = findWindowExprs(expr);
+      expect(windows).to.have.lengthOf(2);
+    });
+
+    it("should return empty array for expression without windows", () => {
+      const expr: MetricExpr = { kind: "Literal", value: 42 };
+      expect(findWindowExprs(expr)).to.be.empty;
+    });
+  });
+
+  describe("findTransformExprs", () => {
+    it("should find all Transform expressions in tree", () => {
+      const expr: MetricExpr = {
+        kind: "BinaryOp",
+        op: "-",
+        left: { kind: "MetricRef", name: "currentSales" },
+        right: {
+          kind: "Transform",
+          base: { kind: "MetricRef", name: "currentSales" },
+          transformId: "last_year",
+          transformKind: "table",
+        },
+      };
+
+      const transforms = findTransformExprs(expr);
+
+      expect(transforms).to.have.lengthOf(1);
+      expect(transforms[0].transformId).to.equal("last_year");
+    });
+
+    it("should find nested Transform expressions", () => {
+      const expr: MetricExpr = {
+        kind: "Transform",
+        base: {
+          kind: "Transform",
+          base: { kind: "MetricRef", name: "sales" },
+          transformId: "last_week",
+          transformKind: "table",
+        },
+        transformId: "last_year",
+        transformKind: "table",
+      };
+
+      const transforms = findTransformExprs(expr);
+      expect(transforms).to.have.lengthOf(2);
+    });
+
+    it("should return empty array for expression without transforms", () => {
+      const expr: MetricExpr = { kind: "AttrRef", name: "salesAmount" };
+      expect(findTransformExprs(expr)).to.be.empty;
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WINDOW/TRANSFORM PLAN NODE CONVERSION TESTS
+// ---------------------------------------------------------------------------
+
+describe("Window/Transform Plan Node Conversion", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  describe("windowInfoToPlanNode", () => {
+    it("should convert window info to plan node", () => {
+      const info = {
+        kind: "window" as const,
+        partitionBy: ["storeId"],
+        orderBy: "weekId",
+        frame: { kind: "rolling" as const, count: 7 },
+        aggregate: "sum" as const,
+        baseExpr: { kind: "AttrRef" as const, name: "salesAmount" },
+      };
+
+      const node = windowInfoToPlanNode(info, "input_1", model, "rolling_sales");
+
+      expect(node.kind).to.equal("Window");
+      expect(node.inputId).to.equal("input_1");
+      expect(node.partitionBy).to.have.lengthOf(1);
+      expect(node.partitionBy[0].attributeId).to.equal("storeId");
+      expect(node.orderBy).to.have.lengthOf(1);
+      expect(node.orderBy[0].attr.attributeId).to.equal("weekId");
+      expect(node.frame.kind).to.equal("rolling");
+      expect(node.windowFunctions[0].outputName).to.equal("rolling_sales");
+      expect(node.windowFunctions[0].op).to.equal("sum");
+    });
+
+    it("should handle empty partition/order attributes", () => {
+      const info = {
+        kind: "window" as const,
+        partitionBy: [],
+        orderBy: "unknownAttr", // not in model
+        frame: { kind: "cumulative" as const },
+        aggregate: "avg" as const,
+        baseExpr: { kind: "Literal" as const, value: 1 },
+      };
+
+      const node = windowInfoToPlanNode(info, "input_1", model, "cumulative_avg");
+
+      expect(node.partitionBy).to.be.empty;
+      expect(node.orderBy).to.be.empty; // unknown attr resolves to empty
+    });
+  });
+
+  describe("transformInfoToPlanNode", () => {
+    it("should convert transform info to plan node", () => {
+      const info = {
+        kind: "transform" as const,
+        transformId: "week_to_ly",
+        transformKind: "table" as const,
+        inputAttr: "weekId",
+        outputAttr: "weekName",
+        baseExpr: { kind: "MetricRef" as const, name: "totalSales" },
+      };
+
+      const node = transformInfoToPlanNode(info, "input_1", model);
+
+      expect(node).to.not.be.null;
+      expect(node!.kind).to.equal("Transform");
+      expect(node!.inputId).to.equal("input_1");
+      expect(node!.transformKind).to.equal("table");
+      expect(node!.transformId).to.equal("week_to_ly");
+      expect(node!.inputAttr.attributeId).to.equal("weekId");
+      expect(node!.outputAttr.attributeId).to.equal("weekName");
+    });
+
+    it("should return null if input attribute not found", () => {
+      const info = {
+        kind: "transform" as const,
+        transformId: "test",
+        transformKind: "rowset" as const,
+        inputAttr: "unknownAttr",
+        outputAttr: "weekId",
+        baseExpr: { kind: "Literal" as const, value: 1 },
+      };
+
+      const node = transformInfoToPlanNode(info, "input_1", model);
+      expect(node).to.be.null;
+    });
+
+    it("should return null if output attribute not found", () => {
+      const info = {
+        kind: "transform" as const,
+        transformId: "test",
+        transformKind: "rowset" as const,
+        inputAttr: "weekId",
+        outputAttr: "unknownOutput",
+        baseExpr: { kind: "Literal" as const, value: 1 },
+      };
+
+      const node = transformInfoToPlanNode(info, "input_1", model);
+      expect(node).to.be.null;
+    });
+
+    it("should return null if no input/output attrs specified", () => {
+      const info = {
+        kind: "transform" as const,
+        transformId: "test",
+        transformKind: "rowset" as const,
+        inputAttr: undefined,
+        outputAttr: undefined,
+        baseExpr: { kind: "Literal" as const, value: 1 },
+      };
+
+      const node = transformInfoToPlanNode(info, "input_1", model);
+      expect(node).to.be.null;
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLAN VISUALIZATION WITH WINDOW/TRANSFORM TESTS
+// ---------------------------------------------------------------------------
+
+describe("Plan Visualization with Window/Transform", () => {
+  beforeEach(() => {
+    resetNodeIdCounter();
+  });
+
+  it("should format window node in plan", () => {
+    const dag = new PlanDag();
+    const factScan = createFactScan("fact_sales", []);
+    const window = createRollingWindow(
+      factScan.id,
+      [makeAttrRef("storeId", "fact_sales", "storeId", "fact")],
+      makeAttrRef("weekId", "dim_week", "id", "dimension"),
+      7,
+      [{ outputName: "rolling_sum", op: "sum", input: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact") }]
+    );
+
+    dag.addNode(factScan);
+    dag.addNode(window);
+    dag.setRoot(window.id);
+
+    const output = formatPlanDag(dag);
+
+    expect(output).to.include("Window");
+    expect(output).to.include("FactScan");
+  });
+
+  it("should format transform node in plan", () => {
+    const dag = new PlanDag();
+    const factScan = createFactScan("fact_sales", []);
+    const transform = createRowsetTransform(
+      factScan.id,
+      "last_year",
+      makeAttrRef("weekId", "fact_sales", "weekId", "fact"),
+      makeAttrRef("lyWeekId", "dim_week", "ly_id", "dimension")
+    );
+
+    dag.addNode(factScan);
+    dag.addNode(transform);
+    dag.setRoot(transform.id);
+
+    const output = formatPlanDag(dag);
+
+    expect(output).to.include("Transform");
+    expect(output).to.include("last_year");
+    expect(output).to.include("FactScan");
+  });
+
+  it("should format project node in plan", () => {
+    const dag = new PlanDag();
+    const factScan = createFactScan("fact_sales", []);
+    const project = createProject(factScan.id, [
+      { name: "sales", expr: makeAttrRef("salesAmount", "fact_sales", "salesAmount", "fact") }
+    ]);
+
+    dag.addNode(factScan);
+    dag.addNode(project);
+    dag.setRoot(project.id);
+
+    const output = formatPlanDag(dag);
+
+    expect(output).to.include("Project");
+    expect(output).to.include("FactScan");
   });
 });
