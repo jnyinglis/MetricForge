@@ -1511,3 +1511,706 @@ export function buildLogicalPlan(
   // 10. Assemble the final plan
   return assemblePlan(dag, outputGrain, outputMetrics, metricEvalOrder);
 }
+
+// ---------------------------------------------------------------------------
+// EXPLAIN PLAN (Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Options for explaining a plan.
+ */
+export interface ExplainOptions {
+  /** Whether to include detailed node information */
+  verbose?: boolean;
+  /** Whether to include metric expressions */
+  showExpressions?: boolean;
+}
+
+/**
+ * Generate a human-readable EXPLAIN output for a logical query plan.
+ * This provides visibility into what the plan will do before execution.
+ *
+ * @param plan - The logical query plan to explain
+ * @param options - Optional formatting options
+ * @returns A formatted string representation of the plan
+ */
+export function explainPlan(
+  plan: LogicalQueryPlan,
+  options: ExplainOptions = {}
+): string {
+  const { verbose = false, showExpressions = false } = options;
+  const lines: string[] = [];
+
+  lines.push("EXPLAIN:");
+  lines.push("");
+
+  // Plan DAG section
+  lines.push("Plan DAG:");
+  const dagLines = formatPlanDagForExplain(plan, verbose);
+  dagLines.forEach((line) => lines.push("  " + line));
+  lines.push("");
+
+  // Output Grain section
+  const grainDims = plan.outputGrain.dimensions.map((d) => d.attributeId).join(", ");
+  lines.push(`Output Grain: ${grainDims || "(none)"}`);
+  lines.push("");
+
+  // Metrics section with execution phases
+  lines.push("Metrics (evaluation order):");
+  const metricsByPhase = groupMetricsByPhase(plan.outputMetrics);
+
+  for (const [phase, metrics] of metricsByPhase) {
+    const metricStrs = metrics.map((m) => {
+      if (showExpressions && m.dependencies.length > 0) {
+        return `${m.name} = f(${m.dependencies.join(", ")})`;
+      }
+      return m.name;
+    });
+    lines.push(`  Phase ${phase}: ${metricStrs.join(", ")}`);
+  }
+
+  // Optional: cost estimates
+  if (verbose && (plan.estimatedRowCount || plan.estimatedCost)) {
+    lines.push("");
+    lines.push("Estimates:");
+    if (plan.estimatedRowCount) {
+      lines.push(`  Rows: ~${plan.estimatedRowCount}`);
+    }
+    if (plan.estimatedCost) {
+      lines.push(`  Cost: ~${plan.estimatedCost}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Format the plan DAG for EXPLAIN output with proper indentation.
+ */
+function formatPlanDagForExplain(
+  plan: LogicalQueryPlan,
+  verbose: boolean
+): string[] {
+  const lines: string[] = [];
+  const visited = new Set<PlanNodeId>();
+
+  function formatNode(id: PlanNodeId, indent: number): void {
+    if (visited.has(id)) {
+      lines.push(`${"  ".repeat(indent)}↳ [${id}] (see above)`);
+      return;
+    }
+    visited.add(id);
+
+    const node = plan.nodes.get(id);
+    if (!node) {
+      lines.push(`${"  ".repeat(indent)}[${id}] (missing)`);
+      return;
+    }
+
+    const prefix = "  ".repeat(indent);
+    const arrow = indent > 0 ? "↳ " : "";
+
+    switch (node.kind) {
+      case "FactScan":
+        lines.push(`${prefix}${arrow}[${node.id}] FactScan ${node.tableName}`);
+        if (verbose && node.requiredColumns.length > 0) {
+          lines.push(`${prefix}    columns: ${node.requiredColumns.map((c) => c.attributeId).join(", ")}`);
+        }
+        if (node.inlineFilters.length > 0) {
+          lines.push(`${prefix}    filter: (${node.inlineFilters.length} conditions)`);
+        }
+        break;
+
+      case "DimensionScan":
+        lines.push(`${prefix}${arrow}[${node.id}] DimensionScan ${node.tableName}`);
+        if (verbose && node.requiredColumns.length > 0) {
+          lines.push(`${prefix}    columns: ${node.requiredColumns.map((c) => c.attributeId).join(", ")}`);
+        }
+        if (node.inlineFilters.length > 0) {
+          lines.push(`${prefix}    filter: (${node.inlineFilters.length} conditions)`);
+        }
+        break;
+
+      case "Join":
+        const joinKeyStr = node.joinKeys
+          .map((k) => `${k.leftAttr.attributeId}=${k.rightAttr.attributeId}`)
+          .join(", ");
+        lines.push(`${prefix}${arrow}[${node.id}] Join (${node.joinType}, ${node.cardinality})`);
+        lines.push(`${prefix}    on: ${joinKeyStr}`);
+        formatNode(node.leftInputId, indent + 2);
+        formatNode(node.rightInputId, indent + 2);
+        break;
+
+      case "Filter":
+        lines.push(`${prefix}${arrow}[${node.id}] Filter`);
+        formatNode(node.inputId, indent + 2);
+        break;
+
+      case "Aggregate":
+        lines.push(`${prefix}${arrow}[${node.id}] Aggregate`);
+        if (node.groupBy.length > 0) {
+          lines.push(`${prefix}    groupBy: ${node.groupBy.map((g) => g.attributeId).join(", ")}`);
+        }
+        if (node.aggregates.length > 0) {
+          const aggStrs = node.aggregates.map((a) => `${a.outputName}=${a.expr.op}(...)`);
+          lines.push(`${prefix}    aggregates: ${aggStrs.join(", ")}`);
+        }
+        formatNode(node.inputId, indent + 2);
+        break;
+
+      case "Window":
+        lines.push(`${prefix}${arrow}[${node.id}] Window`);
+        if (node.partitionBy.length > 0) {
+          lines.push(`${prefix}    partitionBy: ${node.partitionBy.map((p) => p.attributeId).join(", ")}`);
+        }
+        if (node.orderBy.length > 0) {
+          const orderStrs = node.orderBy.map((o) => `${o.attr.attributeId} ${o.direction}`);
+          lines.push(`${prefix}    orderBy: ${orderStrs.join(", ")}`);
+        }
+        lines.push(`${prefix}    frame: ${node.frame.kind}`);
+        if (node.windowFunctions.length > 0) {
+          const fnStrs = node.windowFunctions.map((f) => `${f.outputName}=${f.op}(...)`);
+          lines.push(`${prefix}    functions: ${fnStrs.join(", ")}`);
+        }
+        formatNode(node.inputId, indent + 2);
+        break;
+
+      case "Transform":
+        lines.push(`${prefix}${arrow}[${node.id}] Transform ${node.transformId} (${node.transformKind})`);
+        lines.push(`${prefix}    ${node.inputAttr.attributeId} -> ${node.outputAttr.attributeId}`);
+        formatNode(node.inputId, indent + 2);
+        break;
+
+      case "Project":
+        lines.push(`${prefix}${arrow}[${node.id}] Project`);
+        if (verbose && node.outputs.length > 0) {
+          lines.push(`${prefix}    outputs: ${node.outputs.map((o) => o.name).join(", ")}`);
+        }
+        formatNode(node.inputId, indent + 2);
+        break;
+    }
+  }
+
+  formatNode(plan.rootNodeId, 0);
+  return lines;
+}
+
+/**
+ * Group metrics by their execution phase.
+ */
+function groupMetricsByPhase(
+  metrics: LogicalMetricPlan[]
+): Map<number, LogicalMetricPlan[]> {
+  const byPhase = new Map<number, LogicalMetricPlan[]>();
+
+  for (const metric of metrics) {
+    const phase = metric.executionPhase;
+    const existing = byPhase.get(phase) ?? [];
+    existing.push(metric);
+    byPhase.set(phase, existing);
+  }
+
+  // Sort by phase number
+  return new Map([...byPhase.entries()].sort(([a], [b]) => a - b));
+}
+
+/**
+ * Format a LogicalExpr as a human-readable string (for EXPLAIN verbose mode).
+ */
+export function formatLogicalExpr(expr: LogicalExpr): string {
+  switch (expr.kind) {
+    case "Constant":
+      return String(expr.value);
+    case "AttributeRef":
+      return expr.attributeId;
+    case "MetricRef":
+      return `@${expr.metricName}`;
+    case "Aggregate":
+      return `${expr.op}(${formatLogicalExpr(expr.input)})`;
+    case "ScalarOp":
+      return `(${formatLogicalExpr(expr.left)} ${expr.op} ${formatLogicalExpr(expr.right)})`;
+    case "ScalarFunction":
+      return `${expr.fn}(${expr.args.map(formatLogicalExpr).join(", ")})`;
+    case "Conditional":
+      return `IF(${formatLogicalExpr(expr.condition)}, ${formatLogicalExpr(expr.thenExpr)}, ${formatLogicalExpr(expr.elseExpr)})`;
+    case "Coalesce":
+      return `COALESCE(${expr.exprs.map(formatLogicalExpr).join(", ")})`;
+    case "Comparison":
+      return `(${formatLogicalExpr(expr.left)} ${expr.op} ${formatLogicalExpr(expr.right)})`;
+    case "LogicalOp":
+      if (expr.op === "not") {
+        return `NOT(${formatLogicalExpr(expr.operands[0])})`;
+      }
+      return `(${expr.operands.map(formatLogicalExpr).join(` ${expr.op.toUpperCase()} `)})`;
+    case "InList":
+      const negation = expr.negated ? " NOT" : "";
+      return `(${formatLogicalExpr(expr.expr)}${negation} IN (${expr.values.map((v) => String(v.value)).join(", ")}))`;
+    case "Between":
+      return `(${formatLogicalExpr(expr.expr)} BETWEEN ${formatLogicalExpr(expr.low)} AND ${formatLogicalExpr(expr.high)})`;
+    case "IsNull":
+      return expr.negated
+        ? `(${formatLogicalExpr(expr.expr)} IS NOT NULL)`
+        : `(${formatLogicalExpr(expr.expr)} IS NULL)`;
+    default:
+      return "(unknown)";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// COMPILE LOGICAL EXPR (Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Context for evaluating a compiled LogicalExpr.
+ * This provides the runtime environment for expression evaluation.
+ */
+export interface LogicalExprEvalContext {
+  /** Current row being processed */
+  row: Record<string, unknown>;
+  /** Function to get a metric value by name */
+  getMetric: (name: string) => number | undefined;
+  /** Function to get an attribute value by id */
+  getAttribute: (id: string) => unknown;
+}
+
+/**
+ * A compiled evaluator function for a LogicalExpr.
+ * Takes a context and returns the computed value.
+ */
+export type CompiledLogicalExpr = (ctx: LogicalExprEvalContext) => unknown;
+
+/**
+ * Compile a LogicalExpr into an executable evaluator function.
+ * This is the bridge between the logical plan and runtime execution.
+ *
+ * @param expr - The LogicalExpr to compile
+ * @returns A function that evaluates the expression given a context
+ */
+export function compileLogicalExpr(expr: LogicalExpr): CompiledLogicalExpr {
+  switch (expr.kind) {
+    case "Constant":
+      return () => expr.value;
+
+    case "AttributeRef":
+      return (ctx) => ctx.getAttribute(expr.attributeId);
+
+    case "MetricRef":
+      return (ctx) => ctx.getMetric(expr.metricName);
+
+    case "Aggregate": {
+      const inputFn = compileLogicalExpr(expr.input);
+      return (ctx) => {
+        // Aggregates are typically pre-computed at the plan level
+        // This returns the aggregated value from context
+        const val = inputFn(ctx);
+        // In a full implementation, aggregation happens at the plan node level
+        // Here we just pass through for scalar evaluation
+        return val;
+      };
+    }
+
+    case "ScalarOp": {
+      const leftFn = compileLogicalExpr(expr.left);
+      const rightFn = compileLogicalExpr(expr.right);
+      return (ctx) => {
+        const l = Number(leftFn(ctx));
+        const r = Number(rightFn(ctx));
+        switch (expr.op) {
+          case "+": return l + r;
+          case "-": return l - r;
+          case "*": return l * r;
+          case "/": return r !== 0 ? l / r : undefined;
+          case "%": return r !== 0 ? l % r : undefined;
+          default: return undefined;
+        }
+      };
+    }
+
+    case "ScalarFunction": {
+      const argFns = expr.args.map(compileLogicalExpr);
+      return (ctx) => {
+        const args = argFns.map((fn) => fn(ctx));
+        const fn = expr.fn.toLowerCase();
+        switch (fn) {
+          case "abs": return Math.abs(Number(args[0]));
+          case "round": return Math.round(Number(args[0]));
+          case "floor": return Math.floor(Number(args[0]));
+          case "ceil": return Math.ceil(Number(args[0]));
+          case "sqrt": return Math.sqrt(Number(args[0]));
+          case "power": return Math.pow(Number(args[0]), Number(args[1]));
+          case "log": return Math.log(Number(args[0]));
+          case "exp": return Math.exp(Number(args[0]));
+          case "upper": return String(args[0]).toUpperCase();
+          case "lower": return String(args[0]).toLowerCase();
+          case "length": return String(args[0]).length;
+          case "substring": return String(args[0]).substring(Number(args[1]), Number(args[2]));
+          case "concat": return args.map(String).join("");
+          case "trim": return String(args[0]).trim();
+          case "coalesce": return args.find((a) => a != null);
+          case "nullif": return args[0] === args[1] ? null : args[0];
+          case "ifnull": return args[0] ?? args[1];
+          default: return undefined;
+        }
+      };
+    }
+
+    case "Conditional": {
+      const condFn = compileLogicalExpr(expr.condition);
+      const thenFn = compileLogicalExpr(expr.thenExpr);
+      const elseFn = compileLogicalExpr(expr.elseExpr);
+      return (ctx) => {
+        const cond = condFn(ctx);
+        return cond ? thenFn(ctx) : elseFn(ctx);
+      };
+    }
+
+    case "Coalesce": {
+      const exprFns = expr.exprs.map(compileLogicalExpr);
+      return (ctx) => {
+        for (const fn of exprFns) {
+          const val = fn(ctx);
+          if (val != null) return val;
+        }
+        return null;
+      };
+    }
+
+    case "Comparison": {
+      const leftFn = compileLogicalExpr(expr.left);
+      const rightFn = compileLogicalExpr(expr.right);
+      return (ctx) => {
+        const l = leftFn(ctx);
+        const r = rightFn(ctx);
+        switch (expr.op) {
+          case "=": return l === r;
+          case "!=": return l !== r;
+          case "<": return (l as number) < (r as number);
+          case "<=": return (l as number) <= (r as number);
+          case ">": return (l as number) > (r as number);
+          case ">=": return (l as number) >= (r as number);
+          default: return false;
+        }
+      };
+    }
+
+    case "LogicalOp": {
+      const operandFns = expr.operands.map(compileLogicalExpr);
+      return (ctx) => {
+        switch (expr.op) {
+          case "and":
+            return operandFns.every((fn) => fn(ctx));
+          case "or":
+            return operandFns.some((fn) => fn(ctx));
+          case "not":
+            return !operandFns[0](ctx);
+          default:
+            return false;
+        }
+      };
+    }
+
+    case "InList": {
+      const exprFn = compileLogicalExpr(expr.expr);
+      const valueSet = new Set(expr.values.map((v) => v.value));
+      return (ctx) => {
+        const val = exprFn(ctx);
+        const inList = valueSet.has(val as string | number | boolean);
+        return expr.negated ? !inList : inList;
+      };
+    }
+
+    case "Between": {
+      const exprFn = compileLogicalExpr(expr.expr);
+      const lowFn = compileLogicalExpr(expr.low);
+      const highFn = compileLogicalExpr(expr.high);
+      return (ctx) => {
+        const val = exprFn(ctx) as number;
+        const low = lowFn(ctx) as number;
+        const high = highFn(ctx) as number;
+        return val >= low && val <= high;
+      };
+    }
+
+    case "IsNull": {
+      const exprFn = compileLogicalExpr(expr.expr);
+      return (ctx) => {
+        const val = exprFn(ctx);
+        const isNull = val === null || val === undefined;
+        return expr.negated ? !isNull : isNull;
+      };
+    }
+
+    default:
+      return () => undefined;
+  }
+}
+
+/**
+ * Compile a LogicalExpr to a SQL fragment string.
+ * This is useful for generating SQL queries from logical plans.
+ *
+ * @param expr - The LogicalExpr to compile
+ * @param aliasMap - Optional map of attribute IDs to SQL column names
+ * @returns SQL fragment string
+ */
+export function compileLogicalExprToSql(
+  expr: LogicalExpr,
+  aliasMap: Map<string, string> = new Map()
+): string {
+  const col = (attrId: string) => aliasMap.get(attrId) ?? attrId;
+
+  switch (expr.kind) {
+    case "Constant":
+      if (typeof expr.value === "string") {
+        return `'${expr.value.replace(/'/g, "''")}'`;
+      }
+      if (expr.value === null) return "NULL";
+      if (typeof expr.value === "boolean") return expr.value ? "TRUE" : "FALSE";
+      return String(expr.value);
+
+    case "AttributeRef":
+      return col(expr.attributeId);
+
+    case "MetricRef":
+      // Metrics are referenced by name in SQL (typically as computed columns)
+      return `"${expr.metricName}"`;
+
+    case "Aggregate":
+      return `${expr.op.toUpperCase()}(${compileLogicalExprToSql(expr.input, aliasMap)})`;
+
+    case "ScalarOp":
+      return `(${compileLogicalExprToSql(expr.left, aliasMap)} ${expr.op} ${compileLogicalExprToSql(expr.right, aliasMap)})`;
+
+    case "ScalarFunction":
+      return `${expr.fn.toUpperCase()}(${expr.args.map((a) => compileLogicalExprToSql(a, aliasMap)).join(", ")})`;
+
+    case "Conditional":
+      return `CASE WHEN ${compileLogicalExprToSql(expr.condition, aliasMap)} THEN ${compileLogicalExprToSql(expr.thenExpr, aliasMap)} ELSE ${compileLogicalExprToSql(expr.elseExpr, aliasMap)} END`;
+
+    case "Coalesce":
+      return `COALESCE(${expr.exprs.map((e) => compileLogicalExprToSql(e, aliasMap)).join(", ")})`;
+
+    case "Comparison":
+      const sqlOp = expr.op === "!=" ? "<>" : expr.op;
+      return `(${compileLogicalExprToSql(expr.left, aliasMap)} ${sqlOp} ${compileLogicalExprToSql(expr.right, aliasMap)})`;
+
+    case "LogicalOp":
+      if (expr.op === "not") {
+        return `NOT (${compileLogicalExprToSql(expr.operands[0], aliasMap)})`;
+      }
+      return `(${expr.operands.map((o) => compileLogicalExprToSql(o, aliasMap)).join(` ${expr.op.toUpperCase()} `)})`;
+
+    case "InList": {
+      const valuesStr = expr.values
+        .map((v) => {
+          if (typeof v.value === "string") return `'${v.value.replace(/'/g, "''")}'`;
+          return String(v.value);
+        })
+        .join(", ");
+      const notStr = expr.negated ? " NOT" : "";
+      return `(${compileLogicalExprToSql(expr.expr, aliasMap)}${notStr} IN (${valuesStr}))`;
+    }
+
+    case "Between":
+      return `(${compileLogicalExprToSql(expr.expr, aliasMap)} BETWEEN ${compileLogicalExprToSql(expr.low, aliasMap)} AND ${compileLogicalExprToSql(expr.high, aliasMap)})`;
+
+    case "IsNull":
+      const nullOp = expr.negated ? "IS NOT NULL" : "IS NULL";
+      return `(${compileLogicalExprToSql(expr.expr, aliasMap)} ${nullOp})`;
+
+    default:
+      return "NULL";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SEMANTIC QUERY INTEGRATION (Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extended execution options that include logical plan features.
+ */
+export interface ExtendedExecutionOptions {
+  /** When true, return EXPLAIN output instead of executing the query */
+  explain?: boolean;
+  /** Options for EXPLAIN output */
+  explainOptions?: ExplainOptions;
+  /** When true, attach the logical plan to the result */
+  includePlan?: boolean;
+}
+
+/**
+ * Result of running a semantic query with logical plan integration.
+ */
+export interface SemanticQueryResult<T = Record<string, unknown>[]> {
+  /** Query results (or EXPLAIN output when explain=true) */
+  data: T | string;
+  /** The logical plan (if includePlan=true or explain=true) */
+  plan?: LogicalQueryPlan;
+  /** Execution metadata */
+  metadata?: {
+    planBuildTimeMs?: number;
+    executionTimeMs?: number;
+    rowCount?: number;
+  };
+}
+
+/**
+ * Query specification for semantic queries (matches QuerySpec from semanticEngine).
+ */
+export interface LogicalQuerySpec {
+  dimensions: string[];
+  metrics: string[];
+}
+
+/**
+ * Build and optionally execute a semantic query with logical plan support.
+ * This is the integration point between the new logical plan infrastructure
+ * and the existing runSemanticQuery function.
+ *
+ * Usage:
+ * ```typescript
+ * // Get EXPLAIN output
+ * const result = await runWithLogicalPlan(env, spec, { explain: true });
+ * console.log(result.data); // EXPLAIN output
+ *
+ * // Get results with plan attached
+ * const result = await runWithLogicalPlan(env, spec, { includePlan: true });
+ * console.log(result.data); // Query results
+ * console.log(result.plan); // The logical plan used
+ * ```
+ *
+ * @param model - The semantic model
+ * @param spec - Query specification
+ * @param options - Execution options including explain mode
+ * @returns Query result with optional plan and metadata
+ */
+export function buildQueryPlan(
+  model: SemanticModel,
+  spec: LogicalQuerySpec,
+  options: ExtendedExecutionOptions = {}
+): SemanticQueryResult<undefined> {
+  const startTime = Date.now();
+
+  // Build the logical plan
+  const plan = buildLogicalPlan(spec, model);
+
+  const planBuildTimeMs = Date.now() - startTime;
+
+  // If explain mode, return the EXPLAIN output
+  if (options.explain) {
+    const explainOutput = explainPlan(plan, options.explainOptions);
+    return {
+      data: explainOutput,
+      plan,
+      metadata: {
+        planBuildTimeMs,
+      },
+    };
+  }
+
+  // Return the plan without executing (execution is done by semanticEngine)
+  return {
+    data: undefined,
+    plan: options.includePlan ? plan : undefined,
+    metadata: {
+      planBuildTimeMs,
+    },
+  };
+}
+
+/**
+ * Generate SQL from a logical query plan.
+ * This provides a foundation for future SQL backend support.
+ *
+ * @param plan - The logical query plan
+ * @returns A SQL query string
+ */
+export function planToSql(plan: LogicalQueryPlan): string {
+  const lines: string[] = [];
+
+  // Build SELECT clause from output metrics and dimensions
+  const selectItems: string[] = [];
+
+  // Add dimension columns (from output grain)
+  for (const dim of plan.outputGrain.dimensions) {
+    selectItems.push(dim.attributeId);
+  }
+
+  // Add metric expressions
+  for (const metric of plan.outputMetrics) {
+    const exprSql = compileLogicalExprToSql(metric.expr);
+    selectItems.push(`${exprSql} AS "${metric.name}"`);
+  }
+
+  lines.push(`SELECT ${selectItems.join(", ")}`);
+
+  // Build FROM/JOIN clauses by walking the plan DAG
+  const fromClauses = buildFromClauses(plan);
+  lines.push(`FROM ${fromClauses}`);
+
+  // Add GROUP BY if we have dimensions
+  if (plan.outputGrain.dimensions.length > 0) {
+    const groupByItems = plan.outputGrain.dimensions.map((d) => d.attributeId);
+    lines.push(`GROUP BY ${groupByItems.join(", ")}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Build FROM/JOIN clauses from the plan DAG.
+ */
+function buildFromClauses(plan: LogicalQueryPlan): string {
+  const parts: string[] = [];
+  const visited = new Set<PlanNodeId>();
+
+  function visit(nodeId: PlanNodeId): string {
+    if (visited.has(nodeId)) return "";
+    visited.add(nodeId);
+
+    const node = plan.nodes.get(nodeId);
+    if (!node) return "";
+
+    switch (node.kind) {
+      case "FactScan":
+        return node.tableName;
+
+      case "DimensionScan":
+        return node.tableName;
+
+      case "Join": {
+        const left = visit(node.leftInputId);
+        const right = visit(node.rightInputId);
+        const joinKeys = node.joinKeys
+          .map((k) => `${k.leftAttr.attributeId} = ${k.rightAttr.attributeId}`)
+          .join(" AND ");
+        const joinType = node.joinType === "inner" ? "INNER JOIN" :
+                         node.joinType === "left" ? "LEFT JOIN" :
+                         node.joinType === "right" ? "RIGHT JOIN" : "FULL JOIN";
+        return `${left} ${joinType} ${right} ON ${joinKeys}`;
+      }
+
+      case "Filter":
+        return visit(node.inputId);
+
+      case "Aggregate":
+        return visit(node.inputId);
+
+      case "Window":
+        return visit(node.inputId);
+
+      case "Transform":
+        return visit(node.inputId);
+
+      case "Project":
+        return visit(node.inputId);
+
+      default:
+        return "";
+    }
+  }
+
+  const result = visit(plan.rootNodeId);
+  return result || "(no tables)";
+}

@@ -16,6 +16,17 @@ import {
   DimensionScanNode,
   JoinNode,
   AggregateNode,
+  LogicalExpr,
+  LogicalConstant,
+  LogicalScalarOp,
+  LogicalComparison,
+  LogicalConditional,
+  LogicalCoalesce,
+  LogicalInList,
+  LogicalBetween,
+  LogicalIsNull,
+  LogicalLogicalOp,
+  LogicalScalarFunction,
 } from "../src/logicalAst";
 import {
   generateNodeId,
@@ -60,6 +71,15 @@ import {
   topologicalSortMetrics,
   classifyFilter,
   buildLogicalPlan,
+  // Phase 5 exports
+  ExplainOptions,
+  explainPlan,
+  formatLogicalExpr,
+  compileLogicalExpr,
+  compileLogicalExprToSql,
+  LogicalExprEvalContext,
+  buildQueryPlan,
+  planToSql,
 } from "../src/planBuilder";
 
 // ---------------------------------------------------------------------------
@@ -1645,5 +1665,477 @@ describe("buildLogicalPlan", () => {
 
     const totalSalesPlan = plan.outputMetrics.find((m) => m.name === "totalSales");
     expect(totalSalesPlan?.requiredAttrs.length).to.be.greaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PHASE 5: EXPLAIN AND INTEGRATION TESTS
+// ---------------------------------------------------------------------------
+
+// Helper functions to create LogicalExpr nodes with proper type definitions
+const mkConst = (value: number | string | boolean | null): LogicalConstant => ({
+  kind: "Constant",
+  value,
+  dataType: typeof value === "number" ? DataTypes.number :
+            typeof value === "string" ? DataTypes.string :
+            typeof value === "boolean" ? DataTypes.boolean : DataTypes.null,
+});
+
+const mkAttr = (attributeId: string): LogicalAttributeRef => ({
+  kind: "AttributeRef",
+  attributeId,
+  logicalName: attributeId,
+  physicalTable: "test_table",
+  physicalColumn: attributeId,
+  dataType: DataTypes.string,
+  sourceKind: "fact",
+});
+
+const mkNumAttr = (attributeId: string): LogicalAttributeRef => ({
+  kind: "AttributeRef",
+  attributeId,
+  logicalName: attributeId,
+  physicalTable: "test_table",
+  physicalColumn: attributeId,
+  dataType: DataTypes.number,
+  sourceKind: "fact",
+});
+
+const mkMetricRef = (metricName: string): LogicalExpr => ({
+  kind: "MetricRef",
+  metricName,
+  baseFact: "fact_sales",
+  resultType: DataTypes.number,
+});
+
+const mkScalarOp = (op: "+" | "-" | "*" | "/" | "%", left: LogicalExpr, right: LogicalExpr): LogicalScalarOp => ({
+  kind: "ScalarOp",
+  op,
+  left,
+  right,
+  resultType: DataTypes.number,
+});
+
+const mkComparison = (op: "=" | "!=" | "<" | "<=" | ">" | ">=", left: LogicalExpr, right: LogicalExpr): LogicalComparison => ({
+  kind: "Comparison",
+  op,
+  left,
+  right,
+  resultType: { kind: "boolean" },
+});
+
+const mkAggregate = (op: "sum" | "avg" | "min" | "max" | "count", input: LogicalExpr): LogicalAggregate => ({
+  kind: "Aggregate",
+  op,
+  input,
+  distinct: false,
+  resultType: DataTypes.number,
+});
+
+const mkCoalesce = (...exprs: LogicalExpr[]): LogicalCoalesce => ({
+  kind: "Coalesce",
+  exprs,
+  resultType: DataTypes.number,
+});
+
+const mkInList = (expr: LogicalExpr, values: LogicalConstant[], negated: boolean = false): LogicalInList => ({
+  kind: "InList",
+  expr,
+  values,
+  negated,
+  resultType: { kind: "boolean" },
+});
+
+const mkBetween = (expr: LogicalExpr, low: LogicalExpr, high: LogicalExpr): LogicalBetween => ({
+  kind: "Between",
+  expr,
+  low,
+  high,
+  resultType: { kind: "boolean" },
+});
+
+const mkIsNull = (expr: LogicalExpr, negated: boolean = false): LogicalIsNull => ({
+  kind: "IsNull",
+  expr,
+  negated,
+  resultType: { kind: "boolean" },
+});
+
+const mkScalarFn = (fn: string, ...args: LogicalExpr[]): LogicalScalarFunction => ({
+  kind: "ScalarFunction",
+  fn,
+  args,
+  resultType: DataTypes.number,
+});
+
+const mkLogicalOp = (op: "and" | "or" | "not", ...operands: LogicalComparison[]): LogicalLogicalOp => ({
+  kind: "LogicalOp",
+  op,
+  operands,
+  resultType: { kind: "boolean" },
+});
+
+const mkConditional = (condition: LogicalExpr, thenExpr: LogicalExpr, elseExpr: LogicalExpr): LogicalConditional => ({
+  kind: "Conditional",
+  condition,
+  thenExpr,
+  elseExpr,
+  resultType: DataTypes.string,
+});
+
+describe("formatLogicalExpr", () => {
+  it("should format Constant expressions", () => {
+    expect(formatLogicalExpr(mkConst(42))).to.equal("42");
+    expect(formatLogicalExpr(mkConst("hello"))).to.equal("hello");
+  });
+
+  it("should format AttributeRef expressions", () => {
+    expect(formatLogicalExpr(mkAttr("storeName"))).to.equal("storeName");
+  });
+
+  it("should format MetricRef expressions", () => {
+    expect(formatLogicalExpr(mkMetricRef("totalSales"))).to.equal("@totalSales");
+  });
+
+  it("should format Aggregate expressions", () => {
+    expect(formatLogicalExpr(mkAggregate("sum", mkNumAttr("amount")))).to.equal("sum(amount)");
+  });
+
+  it("should format ScalarOp expressions", () => {
+    expect(formatLogicalExpr(mkScalarOp("+", mkConst(10), mkConst(5)))).to.equal("(10 + 5)");
+  });
+
+  it("should format Comparison expressions", () => {
+    expect(formatLogicalExpr(mkComparison(">", mkNumAttr("amount"), mkConst(100)))).to.equal("(amount > 100)");
+  });
+
+  it("should format Conditional expressions", () => {
+    const cond = mkConditional(mkComparison(">", mkConst(10), mkConst(5)), mkConst("yes"), mkConst("no"));
+    expect(formatLogicalExpr(cond)).to.equal("IF((10 > 5), yes, no)");
+  });
+
+  it("should format Coalesce expressions", () => {
+    expect(formatLogicalExpr(mkCoalesce(mkNumAttr("val1"), mkConst(0)))).to.equal("COALESCE(val1, 0)");
+  });
+
+  it("should format LogicalOp expressions", () => {
+    const logicalAnd = mkLogicalOp("and", mkComparison(">", mkConst(10), mkConst(5)), mkComparison("<", mkConst(20), mkConst(30)));
+    expect(formatLogicalExpr(logicalAnd)).to.equal("((10 > 5) AND (20 < 30))");
+
+    const logicalNot = mkLogicalOp("not", mkComparison("=", mkConst(1), mkConst(1)));
+    expect(formatLogicalExpr(logicalNot)).to.equal("NOT((1 = 1))");
+  });
+
+  it("should format InList expressions", () => {
+    const inList = mkInList(mkAttr("status"), [mkConst("active"), mkConst("pending")]);
+    expect(formatLogicalExpr(inList)).to.equal("(status IN (active, pending))");
+
+    const notInList = mkInList(mkAttr("status"), [mkConst("active"), mkConst("pending")], true);
+    expect(formatLogicalExpr(notInList)).to.equal("(status NOT IN (active, pending))");
+  });
+
+  it("should format Between expressions", () => {
+    expect(formatLogicalExpr(mkBetween(mkNumAttr("amount"), mkConst(10), mkConst(100)))).to.equal("(amount BETWEEN 10 AND 100)");
+  });
+
+  it("should format IsNull expressions", () => {
+    expect(formatLogicalExpr(mkIsNull(mkNumAttr("value")))).to.equal("(value IS NULL)");
+    expect(formatLogicalExpr(mkIsNull(mkNumAttr("value"), true))).to.equal("(value IS NOT NULL)");
+  });
+});
+
+describe("compileLogicalExpr", () => {
+  const mockContext: LogicalExprEvalContext = {
+    row: { amount: 100, status: "active" },
+    getMetric: (name) => (name === "totalSales" ? 1000 : undefined),
+    getAttribute: (id) => (mockContext.row as Record<string, unknown>)[id],
+  };
+
+  it("should evaluate Constant expressions", () => {
+    expect(compileLogicalExpr(mkConst(42))(mockContext)).to.equal(42);
+  });
+
+  it("should evaluate AttributeRef expressions", () => {
+    expect(compileLogicalExpr(mkNumAttr("amount"))(mockContext)).to.equal(100);
+  });
+
+  it("should evaluate MetricRef expressions", () => {
+    expect(compileLogicalExpr(mkMetricRef("totalSales"))(mockContext)).to.equal(1000);
+  });
+
+  it("should evaluate ScalarOp expressions", () => {
+    expect(compileLogicalExpr(mkScalarOp("+", mkConst(10), mkConst(5)))(mockContext)).to.equal(15);
+    expect(compileLogicalExpr(mkScalarOp("-", mkConst(10), mkConst(5)))(mockContext)).to.equal(5);
+    expect(compileLogicalExpr(mkScalarOp("*", mkConst(10), mkConst(5)))(mockContext)).to.equal(50);
+    expect(compileLogicalExpr(mkScalarOp("/", mkConst(10), mkConst(5)))(mockContext)).to.equal(2);
+  });
+
+  it("should handle division by zero", () => {
+    expect(compileLogicalExpr(mkScalarOp("/", mkConst(10), mkConst(0)))(mockContext)).to.be.undefined;
+  });
+
+  it("should evaluate Comparison expressions", () => {
+    expect(compileLogicalExpr(mkComparison(">", mkConst(10), mkConst(5)))(mockContext)).to.be.true;
+    expect(compileLogicalExpr(mkComparison("<", mkConst(10), mkConst(5)))(mockContext)).to.be.false;
+    expect(compileLogicalExpr(mkComparison("=", mkConst(10), mkConst(10)))(mockContext)).to.be.true;
+  });
+
+  it("should evaluate LogicalOp expressions", () => {
+    const andOp = mkLogicalOp("and", mkComparison(">", mkConst(10), mkConst(5)), mkComparison("<", mkConst(3), mkConst(8)));
+    expect(compileLogicalExpr(andOp)(mockContext)).to.be.true;
+
+    const orOp = mkLogicalOp("or", mkComparison("<", mkConst(10), mkConst(5)), mkComparison(">", mkConst(10), mkConst(5)));
+    expect(compileLogicalExpr(orOp)(mockContext)).to.be.true;
+
+    const notOp = mkLogicalOp("not", mkComparison(">", mkConst(5), mkConst(10)));
+    expect(compileLogicalExpr(notOp)(mockContext)).to.be.true;
+  });
+
+  it("should evaluate Conditional expressions", () => {
+    const condTrue = mkConditional(mkComparison(">", mkConst(10), mkConst(5)), mkConst("yes"), mkConst("no"));
+    expect(compileLogicalExpr(condTrue)(mockContext)).to.equal("yes");
+
+    const condFalse = mkConditional(mkComparison("<", mkConst(10), mkConst(5)), mkConst("yes"), mkConst("no"));
+    expect(compileLogicalExpr(condFalse)(mockContext)).to.equal("no");
+  });
+
+  it("should evaluate Coalesce expressions", () => {
+    expect(compileLogicalExpr(mkCoalesce(mkConst(null), mkConst(42)))(mockContext)).to.equal(42);
+  });
+
+  it("should evaluate InList expressions", () => {
+    const inList = mkInList(mkConst("active"), [mkConst("active"), mkConst("pending")]);
+    expect(compileLogicalExpr(inList)(mockContext)).to.be.true;
+
+    const notInList = mkInList(mkConst("active"), [mkConst("active"), mkConst("pending")], true);
+    expect(compileLogicalExpr(notInList)(mockContext)).to.be.false;
+  });
+
+  it("should evaluate Between expressions", () => {
+    expect(compileLogicalExpr(mkBetween(mkConst(50), mkConst(10), mkConst(100)))(mockContext)).to.be.true;
+    expect(compileLogicalExpr(mkBetween(mkConst(5), mkConst(10), mkConst(100)))(mockContext)).to.be.false;
+  });
+
+  it("should evaluate IsNull expressions", () => {
+    expect(compileLogicalExpr(mkIsNull(mkConst(null)))(mockContext)).to.be.true;
+    expect(compileLogicalExpr(mkIsNull(mkConst(null), true))(mockContext)).to.be.false;
+  });
+
+  it("should evaluate ScalarFunction expressions", () => {
+    expect(compileLogicalExpr(mkScalarFn("abs", mkConst(-42)))(mockContext)).to.equal(42);
+    expect(compileLogicalExpr(mkScalarFn("upper", mkConst("hello")))(mockContext)).to.equal("HELLO");
+    expect(compileLogicalExpr(mkScalarFn("concat", mkConst("hello"), mkConst(" "), mkConst("world")))(mockContext)).to.equal("hello world");
+  });
+});
+
+describe("compileLogicalExprToSql", () => {
+  it("should compile Constant expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkConst(42))).to.equal("42");
+    expect(compileLogicalExprToSql(mkConst("hello"))).to.equal("'hello'");
+    expect(compileLogicalExprToSql(mkConst(null))).to.equal("NULL");
+    expect(compileLogicalExprToSql(mkConst(true))).to.equal("TRUE");
+  });
+
+  it("should escape single quotes in strings", () => {
+    expect(compileLogicalExprToSql(mkConst("it's"))).to.equal("'it''s'");
+  });
+
+  it("should compile AttributeRef expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkAttr("storeName"))).to.equal("storeName");
+
+    // With alias map
+    const aliasMap = new Map([["storeName", "s.name"]]);
+    expect(compileLogicalExprToSql(mkAttr("storeName"), aliasMap)).to.equal("s.name");
+  });
+
+  it("should compile MetricRef expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkMetricRef("totalSales"))).to.equal('"totalSales"');
+  });
+
+  it("should compile Aggregate expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkAggregate("sum", mkNumAttr("amount")))).to.equal("SUM(amount)");
+  });
+
+  it("should compile ScalarOp expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkScalarOp("+", mkConst(10), mkConst(5)))).to.equal("(10 + 5)");
+  });
+
+  it("should compile Comparison expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkComparison("!=", mkAttr("status"), mkConst("inactive")))).to.equal("(status <> 'inactive')");
+  });
+
+  it("should compile Conditional expressions to SQL CASE", () => {
+    const cond = mkConditional(mkComparison(">", mkConst(10), mkConst(5)), mkConst("yes"), mkConst("no"));
+    expect(compileLogicalExprToSql(cond)).to.equal("CASE WHEN (10 > 5) THEN 'yes' ELSE 'no' END");
+  });
+
+  it("should compile Coalesce expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkCoalesce(mkNumAttr("val1"), mkConst(0)))).to.equal("COALESCE(val1, 0)");
+  });
+
+  it("should compile LogicalOp expressions to SQL", () => {
+    const andOp = mkLogicalOp("and", mkComparison(">", mkConst(10), mkConst(5)), mkComparison("<", mkConst(20), mkConst(30)));
+    expect(compileLogicalExprToSql(andOp)).to.equal("((10 > 5) AND (20 < 30))");
+
+    const notOp = mkLogicalOp("not", mkComparison("=", mkConst(1), mkConst(1)));
+    expect(compileLogicalExprToSql(notOp)).to.equal("NOT ((1 = 1))");
+  });
+
+  it("should compile InList expressions to SQL", () => {
+    const inList = mkInList(mkAttr("status"), [mkConst("active"), mkConst("pending")]);
+    expect(compileLogicalExprToSql(inList)).to.equal("(status IN ('active', 'pending'))");
+
+    const notInList = mkInList(mkAttr("status"), [mkConst("active"), mkConst("pending")], true);
+    expect(compileLogicalExprToSql(notInList)).to.equal("(status NOT IN ('active', 'pending'))");
+  });
+
+  it("should compile Between expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkBetween(mkNumAttr("amount"), mkConst(10), mkConst(100)))).to.equal("(amount BETWEEN 10 AND 100)");
+  });
+
+  it("should compile IsNull expressions to SQL", () => {
+    expect(compileLogicalExprToSql(mkIsNull(mkNumAttr("value")))).to.equal("(value IS NULL)");
+    expect(compileLogicalExprToSql(mkIsNull(mkNumAttr("value"), true))).to.equal("(value IS NOT NULL)");
+  });
+});
+
+describe("explainPlan", () => {
+  it("should generate EXPLAIN output for a simple plan", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+    const output = explainPlan(plan);
+
+    expect(output).to.include("EXPLAIN:");
+    expect(output).to.include("Plan DAG:");
+    expect(output).to.include("Output Grain:");
+    expect(output).to.include("Metrics (evaluation order):");
+    expect(output).to.include("totalSales");
+  });
+
+  it("should show verbose information when requested", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+    const output = explainPlan(plan, { verbose: true });
+
+    expect(output).to.include("columns:");
+  });
+
+  it("should show expressions when requested", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+    const output = explainPlan(plan, { showExpressions: true });
+
+    expect(output).to.include("Phase 0:");
+  });
+
+  it("should show metrics grouped by execution phase", () => {
+    // Create a model with derived metric
+    const derivedModel: SemanticModel = {
+      ...model,
+      metrics: {
+        totalSales,
+        avgSales: buildMetricFromExpr({
+          name: "avgSales",
+          baseFact: "fact_sales",
+          expr: Expr.div(Expr.metric("totalSales"), Expr.lit(10)),
+        }),
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales", "avgSales"],
+    };
+
+    const plan = buildLogicalPlan(query, derivedModel);
+    const output = explainPlan(plan, { showExpressions: true });
+
+    expect(output).to.include("Phase 0:");
+    expect(output).to.include("Phase 1:");
+  });
+});
+
+describe("buildQueryPlan", () => {
+  it("should build a plan and return it", () => {
+    const spec = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const result = buildQueryPlan(model, spec, { includePlan: true });
+
+    expect(result.plan).to.exist;
+    expect(result.metadata?.planBuildTimeMs).to.be.a("number");
+  });
+
+  it("should return EXPLAIN output when explain=true", () => {
+    const spec = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const result = buildQueryPlan(model, spec, { explain: true });
+
+    expect(result.data).to.be.a("string");
+    expect(result.data).to.include("EXPLAIN:");
+    expect(result.plan).to.exist;
+  });
+
+  it("should pass explainOptions to explainPlan", () => {
+    const spec = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const result = buildQueryPlan(model, spec, {
+      explain: true,
+      explainOptions: { verbose: true },
+    });
+
+    expect(result.data).to.include("columns:");
+  });
+});
+
+describe("planToSql", () => {
+  it("should generate SQL from a plan", () => {
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+    const sql = planToSql(plan);
+
+    expect(sql).to.include("SELECT");
+    expect(sql).to.include("storeName");
+    expect(sql).to.include("totalSales");
+    expect(sql).to.include("FROM");
+    expect(sql).to.include("GROUP BY");
+  });
+
+  it("should generate SQL with multiple dimensions", () => {
+    const query = {
+      dimensions: ["storeName", "weekName"],
+      metrics: ["totalSales"],
+    };
+
+    const plan = buildLogicalPlan(query, model);
+    const sql = planToSql(plan);
+
+    expect(sql).to.include("storeName");
+    expect(sql).to.include("weekName");
+    expect(sql).to.include("GROUP BY storeName, weekName");
   });
 });
