@@ -60,6 +60,44 @@ console.log(rows);
 
 The engine builds a fact-backed frame for the primary fact, evaluates each metric within the grouped rowsets, and merges results across additional facts or dimension-scoped metrics before applying optional `having` filters.
 
+## DSL example
+
+You can express the same model and query with the built-in text DSL and let the engine parse it at runtime:
+
+```ts
+import { Schema, SemanticEngine } from "./src/semanticEngine";
+
+const dsl = `
+metric total_sales on fact_orders = sum(amount)
+metric total_refunds on fact_returns = sum(refund)
+
+query store_performance {
+  dimensions: storeId, storeName
+  metrics: total_sales, total_refunds
+}
+`;
+
+const schema: Schema = {
+  facts: { fact_orders: { table: "fact_orders" }, fact_returns: { table: "fact_returns" } },
+  dimensions: { dim_store: { table: "dim_store" } },
+  attributes: {
+    storeId: { table: "fact_orders" },
+    storeName: { table: "dim_store" },
+    amount: { table: "fact_orders" },
+    refund: { table: "fact_returns" },
+  },
+  joins: [
+    { fact: "fact_orders", dimension: "dim_store", factKey: "storeId", dimensionKey: "id" },
+    { fact: "fact_returns", dimension: "dim_store", factKey: "storeId", dimensionKey: "id" },
+  ],
+};
+
+const rows = SemanticEngine.fromSchema(schema, db).useDslFile(dsl).runQuery("store_performance");
+console.log(rows);
+```
+
+This flow loads the schema, ingests inline DSL definitions for metrics and queries, and executes the named query directly.
+
 ## Repository layout
 
 | Path | Description |
