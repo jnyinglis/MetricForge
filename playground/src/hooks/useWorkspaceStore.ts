@@ -54,6 +54,8 @@ interface WorkspaceActions {
   // UI actions
   setActiveTab: (tab: EditorTab | null) => void
   setRightPanelTab: (tab: RightPanelTab) => void
+  setQueryPanelTab: (queryName: string, tab: RightPanelTab) => void
+  closeQueryTab: (queryName: string) => void
   toggleSidebarSection: (section: keyof WorkspaceState['sidebarExpanded']) => void
 
   // Import/Export actions
@@ -102,6 +104,8 @@ const initialState: WorkspaceState = {
   metrics: [],
   queries: [],
   queryResults: [],
+  openQueryTabs: [],
+  queryPanelTabs: {},
   activeTab: null,
   rightPanelTab: 'preview',
   sidebarExpanded: {
@@ -276,6 +280,10 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
             state.activeTab?.type === 'query' && state.activeTab.queryName === name
               ? null
               : state.activeTab,
+          openQueryTabs: state.openQueryTabs.filter((q) => q !== name),
+          queryPanelTabs: Object.fromEntries(
+            Object.entries(state.queryPanelTabs).filter(([key]) => key !== name)
+          ),
         }))
       },
 
@@ -286,7 +294,7 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
             ...state.queryResults.filter((r) => r.queryName !== result.queryName),
             result,
           ],
-          rightPanelTab: 'results',
+          queryPanelTabs: { ...state.queryPanelTabs, [result.queryName]: 'results' },
         }))
       },
 
@@ -296,11 +304,53 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
 
       // UI actions
       setActiveTab: (tab) => {
-        set({ activeTab: tab })
+        set((state) => {
+          if (!tab || tab.type !== 'query') {
+            return { activeTab: tab }
+          }
+
+          const alreadyOpen = state.openQueryTabs.includes(tab.queryName)
+
+          return {
+            activeTab: tab,
+            openQueryTabs: alreadyOpen
+              ? state.openQueryTabs
+              : [...state.openQueryTabs, tab.queryName],
+            queryPanelTabs: state.queryPanelTabs[tab.queryName]
+              ? state.queryPanelTabs
+              : { ...state.queryPanelTabs, [tab.queryName]: 'preview' },
+          }
+        })
       },
 
       setRightPanelTab: (tab) => {
         set({ rightPanelTab: tab })
+      },
+
+      setQueryPanelTab: (queryName, tab) => {
+        set((state) => ({
+          queryPanelTabs: { ...state.queryPanelTabs, [queryName]: tab },
+        }))
+      },
+
+      closeQueryTab: (queryName) => {
+        set((state) => {
+          const remainingTabs = state.openQueryTabs.filter((name) => name !== queryName)
+          const { [queryName]: _closed, ...restQueryTabs } = state.queryPanelTabs
+
+          let nextActive = state.activeTab
+          if (state.activeTab?.type === 'query' && state.activeTab.queryName === queryName) {
+            nextActive = remainingTabs.length
+              ? { type: 'query', queryName: remainingTabs[remainingTabs.length - 1] }
+              : null
+          }
+
+          return {
+            openQueryTabs: remainingTabs,
+            queryPanelTabs: restQueryTabs,
+            activeTab: nextActive,
+          }
+        })
       },
 
       toggleSidebarSection: (section) => {
@@ -371,6 +421,8 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
           queries,
           queryResults: [],
           activeTab: null,
+          openQueryTabs: [],
+          queryPanelTabs: {},
         })
       },
 

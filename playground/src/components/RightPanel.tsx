@@ -9,14 +9,14 @@ export function RightPanel() {
   const tables = useWorkspaceStore((state) => state.tables)
   const metrics = useWorkspaceStore((state) => state.metrics)
   const queries = useWorkspaceStore((state) => state.queries)
-  const queryResults = useWorkspaceStore((state) => state.queryResults)
   const schema = useWorkspaceStore((state) => state.schema)
+
+  const activePanelTab = rightPanelTab === 'results' ? 'preview' : rightPanelTab
 
   const tabs: Array<{ id: RightPanelTab; label: string }> = [
     { id: 'preview', label: 'Preview' },
     { id: 'ast', label: 'AST' },
     { id: 'errors', label: 'Errors' },
-    { id: 'results', label: 'Results' },
   ]
 
   const renderPreview = () => {
@@ -190,71 +190,13 @@ export function RightPanel() {
     )
   }
 
-  const renderResults = () => {
-    if (queryResults.length === 0) {
-      return <div style={{ color: 'var(--text-muted)' }}>No query results yet</div>
-    }
-
-    // Show most recent result
-    const result = queryResults[queryResults.length - 1]
-
-    return (
-      <div>
-        <div style={{ marginBottom: 8, fontSize: 12 }}>
-          <strong>Query:</strong> {result.queryName}
-          <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
-            ({result.executionTime.toFixed(2)}ms)
-          </span>
-        </div>
-
-        {result.error ? (
-          <div style={{ color: 'var(--error)' }}>{result.error}</div>
-        ) : (
-          <>
-            <div style={{ marginBottom: 8, fontSize: 12 }}>
-              <strong>Rows:</strong> {result.rows.length}
-            </div>
-            <div className="table-container">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    {result.columns.map((col) => (
-                      <th key={col}>{col}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.rows.slice(0, 100).map((row, i) => (
-                    <tr key={i}>
-                      {result.columns.map((col) => (
-                        <td key={col}>
-                          {row[col] === undefined ? (
-                            <span style={{ color: 'var(--text-muted)' }}>null</span>
-                          ) : typeof row[col] === 'number' ? (
-                            (row[col] as number).toLocaleString()
-                          ) : (
-                            String(row[col])
-                          )}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </div>
-    )
-  }
-
   return (
     <div className="right-panel">
       <div className="panel-tabs">
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`panel-tab ${rightPanelTab === tab.id ? 'active' : ''}`}
+            className={`panel-tab ${activePanelTab === tab.id ? 'active' : ''}`}
             onClick={() => setRightPanelTab(tab.id)}
           >
             {tab.label}
@@ -268,10 +210,9 @@ export function RightPanel() {
         ))}
       </div>
       <div className="panel-content">
-        {rightPanelTab === 'preview' && renderPreview()}
-        {rightPanelTab === 'ast' && renderAst()}
-        {rightPanelTab === 'errors' && renderErrors()}
-        {rightPanelTab === 'results' && renderResults()}
+        {activePanelTab === 'preview' && renderPreview()}
+        {activePanelTab === 'ast' && renderAst()}
+        {activePanelTab === 'errors' && renderErrors()}
       </div>
     </div>
   )

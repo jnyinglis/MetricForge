@@ -10,6 +10,9 @@ export function Workspace() {
   const tables = useWorkspaceStore((state) => state.tables)
   const metrics = useWorkspaceStore((state) => state.metrics)
   const queries = useWorkspaceStore((state) => state.queries)
+  const openQueryTabs = useWorkspaceStore((state) => state.openQueryTabs)
+  const setActiveTab = useWorkspaceStore((state) => state.setActiveTab)
+  const closeQueryTab = useWorkspaceStore((state) => state.closeQueryTab)
 
   const renderContent = () => {
     if (!activeTab) {
@@ -53,21 +56,46 @@ export function Workspace() {
         return 'Schema Editor'
       case 'metric':
         return `Metric: ${activeTab.metricName}`
-      case 'query':
-        return `Query: ${activeTab.queryName}`
       default:
         return ''
     }
   }
 
+  const queryTabs = openQueryTabs.filter((name) => queries.some((q) => q.name === name))
+
   return (
     <div className="workspace">
-      {activeTab && (
+      {activeTab && activeTab.type === 'query' && queryTabs.length > 0 ? (
         <div className="workspace-tabs">
-          <div className="workspace-tab active">
-            <span>{getTabTitle()}</span>
-          </div>
+          {queryTabs.map((name) => (
+            <div
+              key={name}
+              className={`workspace-tab ${
+                activeTab.type === 'query' && activeTab.queryName === name ? 'active' : ''
+              }`}
+              onClick={() => setActiveTab({ type: 'query', queryName: name })}
+            >
+              <span>{`Query: ${name}`}</span>
+              <span
+                className="workspace-tab-close"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  closeQueryTab(name)
+                }}
+              >
+                ×
+              </span>
+            </div>
+          ))}
         </div>
+      ) : (
+        activeTab && (
+          <div className="workspace-tabs">
+            <div className="workspace-tab active">
+              <span>{getTabTitle()}</span>
+            </div>
+          </div>
+        )
       )}
       <div className="workspace-content">{renderContent()}</div>
     </div>

@@ -13,7 +13,7 @@ function App() {
       <div className="main-content">
         <Sidebar />
         <Workspace />
-        {activeTab && <RightPanel />}
+        {activeTab && activeTab.type !== 'query' && <RightPanel />}
       </div>
     </div>
   )
