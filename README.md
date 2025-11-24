@@ -1,47 +1,23 @@
-# Semantic Engine
+# MetricForge Semantic Engine
 
-This repository contains a **grain-agnostic semantic metrics engine** built entirely in TypeScript. Metrics see only the rows and group key for the current query grain, while the runtime selects the base fact table from metric declarations or falls back to a single related dimension when no facts are needed. LINQ primitives from [`src/linq.js`](src/linq.js) power projection, filtering, grouping, and joining so everything stays in-memory and deterministic.
+MetricForge is a grain-agnostic semantic metrics engine written in TypeScript. It lets you prototype and validate semantic models entirely in-memory, keeping the focus on metric definitions and grain logic instead of warehouse plumbing.
 
-## Core ideas
+## Sweet spot & intended use cases
 
-- **Metric functions, not grain-bound measures** – `MetricDefinition` exposes an `eval` function that receives grouped rows and the current group key; grains are provided by the query, not by the metric definition. 【F:src/semanticEngine.ts†L288-L314】
-- **Explicit base fact selection with graceful dimension fallback** – When metrics declare `baseFact`, the engine builds a fact-backed frame and stitches in additional fact groups as needed; when no metrics or `baseFact` values are present, it runs against a single dimension relation instead of requiring a fact table. 【F:src/semanticEngine.ts†L637-L799】【F:src/semanticEngine.ts†L801-L939】
-- **Rowset transforms for time intelligence** – Metrics can invoke `helpers.applyRowsetTransform` to swap the rowset they aggregate over (e.g., last-year alignment) while still reporting at the current grain. 【F:src/semanticEngine.ts†L308-L314】【F:src/semanticEngine.ts†L525-L591】
-- **Attribute-first filtering** – The `f` helpers normalize objects or filter nodes into expressions that are pruned to available attributes before evaluation, keeping `where` clauses composable across facts and dimensions. 【F:src/semanticEngine.ts†L32-L93】【F:src/semanticEngine.ts†L95-L216】
+- **Prototype a semantic layer quickly** when you want to express facts, dimensions, and metrics without provisioning database infrastructure.
+- **Experiment with grain logic and time-aware transforms** in a deterministic, small-data sandbox before porting definitions to production systems.
+- **Teach or debug semantic modeling concepts**—joins, filters, base-fact choice, and metric dependency graphs—using a transparent runtime you can step through.
 
-## Repository layout
+## How it works
 
-| Path | Description |
-| --- | --- |
-| [`src/semanticEngine.ts`](src/semanticEngine.ts) | Core engine with filter helpers, metric definitions, rowset transforms, and `runSemanticQuery`. |
-| [`src/semanticEngineDemo.ts`](src/semanticEngineDemo.ts) | Minimal demo wiring a store dataset, two fact tables, and aggregate metrics. |
-| [`src/linq.js`](src/linq.js) / [`src/linq.d.ts`](src/linq.d.ts) | Bundled LINQ runtime plus TypeScript declarations used by the engine and tests. |
-| [`src/operators.md`](src/operators.md) | Operator reference for custom LINQ-powered transforms. |
-| [`test/semanticEngine.test.ts`](test/semanticEngine.test.ts) | Mocha + Chai coverage for base fact selection, filters, and rowset transforms. |
-| [`SPEC.md`](SPEC.md) | Design notes motivating the grain-agnostic flow. |
+- **Metric functions, not grain-bound measures**: metric definitions are evaluator functions that receive grouped rows and the current group key; grains are provided by the query, not hard-wired into the metric. 
+- **Explicit base fact selection with graceful dimension fallback**: the runtime builds a fact-backed frame when metrics declare `baseFact`, and falls back to a single dimension relation when no facts are needed.
+- **Rowset transforms for time intelligence**: metrics can swap the rowset they aggregate over (e.g., aligning to last year) while still reporting at the current grain.
+- **Attribute-first filtering**: filter helpers normalize expressions and prune them to available attributes so `where` clauses stay composable across facts and dimensions.
 
-## Getting started
+## Quick example
 
-1. **Install dependencies**:
-   ```bash
-   npm install
-   ```
-2. **Run the automated tests** to exercise the engine end-to-end:
-   ```bash
-   npm test
-   ```
-3. **Try the demo** to see a multi-fact query at work:
-   ```bash
-   npx ts-node src/semanticEngineDemo.ts
-   ```
-4. **Explore the DSL demo** for parsing metric and query definitions from text:
-   ```bash
-   npx ts-node src/dslDemo.ts
-   ```
-
-## Using the engine
-
-Relational queries are described with `QuerySpec` objects that list the output dimensions, metrics, and filters. Metrics are plain functions declared via helpers such as `aggregateMetric` and are free to call other metrics through `evalMetric` or swap rowsets through `applyRowsetTransform`.
+Define a minimal semantic model and run a query at the store grain:
 
 ```ts
 import {
@@ -82,4 +58,45 @@ const rows = runSemanticQuery({ db, model }, spec);
 console.log(rows);
 ```
 
-The engine builds a fact-backed frame for the primary fact, runs metric evaluators within each grouped rowset, and merges results across additional facts or dimension-scoped metrics before applying optional `having` filters. 【F:src/semanticEngine.ts†L801-L976】
+The engine builds a fact-backed frame for the primary fact, evaluates each metric within the grouped rowsets, and merges results across additional facts or dimension-scoped metrics before applying optional `having` filters.
+
+## Repository layout
+
+| Path | Description |
+| --- | --- |
+| [`src/semanticEngine.ts`](src/semanticEngine.ts) | Core engine with filter helpers, metric definitions, rowset transforms, and `runSemanticQuery`. |
+| [`src/semanticEngineDemo.ts`](src/semanticEngineDemo.ts) | Minimal demo wiring a store dataset, two fact tables, and aggregate metrics. |
+| [`src/linq.js`](src/linq.js) / [`src/linq.d.ts`](src/linq.d.ts) | Bundled LINQ runtime plus TypeScript declarations used by the engine and tests. |
+| [`src/operators.md`](src/operators.md) | Operator reference for custom LINQ-powered transforms. |
+| [`test/semanticEngine.test.ts`](test/semanticEngine.test.ts) | Mocha + Chai coverage for base fact selection, filters, and rowset transforms. |
+| [`docs/`](docs) | Design notes, DSL references, and playground guides. |
+| [`playground/`](playground) | React + Vite playground for editing schemas, metrics, and queries in the browser. |
+
+## Getting started
+
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+2. **Run automated tests** to exercise the engine end-to-end:
+   ```bash
+   npm test
+   ```
+3. **Try the CLI demo** to see a multi-fact query at work:
+   ```bash
+   npx ts-node src/semanticEngineDemo.ts
+   ```
+4. **Explore the DSL demo** for parsing metric and query definitions from text:
+   ```bash
+   npx ts-node src/dslDemo.ts
+   ```
+
+## Playground overview
+
+The `playground/` package is a React + Vite single-page app that ships Monaco-based editors for schema, metric, and query DSL definitions. It runs entirely in the browser so you can:
+
+- Load JSON datasets, define facts/dimensions/attributes, and wire joins.
+- Author metrics and queries with syntax highlighting, autocomplete, and inline parser feedback.
+- Execute queries client-side to visualize results, inspect parsed ASTs, and export/import workspaces.
+
+From `playground/`, use `npm install` followed by `npm run dev` to launch the local experience. See [`docs/playground-user-manual.md`](docs/playground-user-manual.md) and [`docs/web-playground.md`](docs/web-playground.md) for full UX and product details.
