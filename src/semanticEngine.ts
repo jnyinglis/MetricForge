@@ -20,6 +20,17 @@ import { compileDslToModel } from "./dsl";
 
 export type Row = Record<string, any>;
 
+/**
+ * Converts an array of {@link Row} objects into the LINQ enumerable used
+ * throughout the engine. This helper centralizes the defaulting logic so
+ * callers can safely pass `null` or `undefined` collections without having to
+ * guard them beforehand.
+ *
+ * @param rows - Raw row objects returned by an in-memory table. Defaults to an
+ * empty array when not provided.
+ * @returns LINQ-friendly enumerable that supports deferred execution methods
+ * such as `select`, `where`, and `groupBy`.
+ */
 export function rowsToEnumerable(rows: Row[] = []) {
   return Enumerable.from(rows ?? []);
 }
@@ -60,6 +71,11 @@ export type FilterContext =
   | Record<string, FilterValue | FilterValue[] | undefined>
   | undefined;
 
+/**
+ * Convenience builder for filter expressions used by {@link FilterContext}.
+ * Each method produces a serializable filter node that can later be combined
+ * or normalized by the engine.
+ */
 export const f = {
   eq(field: string, value: FilterPrimitive | FilterPrimitive[]): FilterExpression {
     if (Array.isArray(value)) {
@@ -146,6 +162,19 @@ function pruneFilterNode(node: FilterNode, allowed: Set<string>): FilterNode | n
   }
 }
 
+/**
+ * Replaces any `:binding` placeholders inside a filter tree with concrete
+ * values supplied at execution time. The function is recursive and preserves
+ * the original filter shape while cloning nested objects so callers can reuse
+ * filter templates safely.
+ *
+ * @param filterNode - Filter node containing literal values or placeholder
+ * strings prefixed with `:`.
+ * @param bindings - Map of binding names to runtime values. Missing bindings
+ * cause an error to avoid silently executing incomplete filters.
+ * @returns A filter node with placeholders substituted, or `null` when no
+ * filter was provided.
+ */
 export function resolveBindingsInFilter(
   filterNode: FilterNode | null,
   bindings: Record<string, any>
@@ -619,21 +648,48 @@ export function collectAttrsAndDeps(expr: MetricExpr): {
  * QUERY SPEC
  * -------------------------------------------------------------------------- */
 
+/**
+ * Declarative query shape understood by the semantic engine. Queries specify
+ * the desired grain (dimensions), the metrics to compute, and optional filters
+ * that should be applied before aggregation. There is intentionally no
+ * `baseFact` setting here: the engine derives the appropriate fact table from
+ * the metrics themselves or falls back to a single dimension relation when no
+ * metrics are provided.
+ */
 export interface QuerySpec {
-  dimensions: string[];                          // logical attributes for grain
-  metrics: string[];                             // metric names
-  where?: FilterContext;                         // attribute-level filter
+  /** Logical attributes representing the grouping grain of the query. */
+  dimensions: string[];
+
+  /** Names of metrics to compute and project into the result set. */
+  metrics: string[];
+
+  /** Optional attribute-level filter to apply before grouping. */
+  where?: FilterContext;
+
+  /**
+   * Optional predicate executed after metrics are computed. It receives the
+   * computed metric values for a row and should return `true` to keep the row
+   * or `false` to drop it.
+   */
   having?: (values: Record<string, number | undefined>) => boolean;
-  // NOTE: no baseFact here; base fact is determined by metrics if present,
-  // or falls back to a dimension relation when there are no metrics.
 }
 
 export type QuerySpecV2 = QuerySpec;
 
+/**
+ * Optional execution-time settings that influence how a query is run.
+ */
 export interface ExecutionOptions {
+  /** Named values that can be referenced inside filters using `:name` tokens. */
   bindings?: Record<string, any>;
 }
 
+/**
+ * Lightweight orchestrator that holds a semantic model, in-memory data, and a
+ * registry of named queries. The class primarily exists to offer a friendlier
+ * surface area around the lower-level functions in this module and is what the
+ * demos instantiate.
+ */
 export class SemanticEngine {
   private schema: Schema;
   private model: SemanticModel;
@@ -646,10 +702,19 @@ export class SemanticEngine {
     this.db = db;
   }
 
+  /**
+   * Creates a new engine instance using the provided semantic schema and
+   * backing in-memory database.
+   */
   static fromSchema(schema: Schema, db: InMemoryDb): SemanticEngine {
     return new SemanticEngine(schema, db);
   }
 
+  /**
+   * Parses a DSL file and merges its contents into the existing model and
+   * query registry. This is a convenience for demos and experimentation where
+   * the model is defined in a text form rather than code.
+   */
   useDslFile(text: string): this {
     const { model, queries } = compileDslToModel(text, this.model);
     this.model = model;
@@ -657,20 +722,37 @@ export class SemanticEngine {
     return this;
   }
 
+  /**
+   * Adds a metric definition to the engine. Callers are responsible for
+   * ensuring the metric is valid; {@link validateMetric} can be used before
+   * registering if needed.
+   */
   registerMetric(def: MetricDefinition): this {
     this.model.metrics[def.name] = def;
     return this;
   }
 
+  /**
+   * Registers a named query for later execution.
+   */
   registerQuery(name: string, spec: QuerySpecV2): this {
     this.queries[name] = spec;
     return this;
   }
 
+  /**
+   * Returns the current semantic model including any dynamically registered
+   * metrics and queries.
+   */
   getModel(): SemanticModel {
     return this.model;
   }
 
+  /**
+   * Fetches a previously registered query by name.
+   *
+   * @throws Error when the query does not exist.
+   */
   getQuery(name: string): QuerySpecV2 {
     const q = this.queries[name];
     if (!q) {
@@ -679,6 +761,11 @@ export class SemanticEngine {
     return q;
   }
 
+  /**
+   * Executes a query either by reference name or by directly supplying a
+   * {@link QuerySpec}. Optional bindings are used to substitute any `:tokens`
+   * inside filter expressions before execution.
+   */
   runQuery(nameOrSpec: string | QuerySpecV2, bindings?: FilterContext) {
     const spec =
       typeof nameOrSpec === "string" ? this.getQuery(nameOrSpec) : nameOrSpec;
@@ -1124,6 +1211,15 @@ function evalBinary(
   }
 }
 
+/**
+ * Compiles a metric expression AST into an executable evaluator. The returned
+ * function is pure and can be cached by callers to avoid re-validating the AST
+ * on every invocation.
+ *
+ * @param expr - Parsed metric expression tree.
+ * @returns A metric evaluator that can be invoked with a
+ * {@link MetricComputationContext}.
+ */
 export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
   function validate(node: MetricExpr): void {
     if (node.kind === "Call") {
@@ -1245,6 +1341,11 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
   return (ctx) => evaluator(expr, ctx);
 }
 
+/**
+ * Helper for creating a metric definition directly from a metric expression
+ * AST. It automatically derives attribute and dependency references so the
+ * metric can participate in validation and dependency checks.
+ */
 export function buildMetricFromExpr(opts: {
   name: string;
   baseFact?: string;
@@ -1269,6 +1370,15 @@ export function buildMetricFromExpr(opts: {
  *
  * NOTE: baseFact is optional. For fact-based metrics you should set it so
  * the engine knows which fact table to use when metrics are present.
+ */
+/**
+ * Builds a simple aggregate metric over a single logical attribute. The grain
+ * is determined by the query, not the metric itself.
+ *
+ * @param name - Metric name to register in the model.
+ * @param baseFact - Fact table backing the metric.
+ * @param attr - Logical attribute to aggregate.
+ * @param op - Aggregate operator to apply (defaults to `sum`).
  */
 export function aggregateMetric(
   name: string,
@@ -1304,6 +1414,11 @@ export function aggregateMetric(
   });
 }
 
+/**
+ * Creates a time-intelligence metric that evaluates another metric against the
+ * previous year's values using a rowset transform anchored on the provided
+ * attribute.
+ */
 export function lastYearMetric(
   name: string,
   baseFact: string,
@@ -1524,6 +1639,11 @@ function metricReferences(
   };
 }
 
+/**
+ * Performs structural validation for a single metric, ensuring referenced
+ * attributes, dependencies, and transforms exist and are reachable from the
+ * metric's base fact.
+ */
 export function validateMetric(
   model: SemanticModel,
   metricName: string
@@ -1705,6 +1825,10 @@ export function validateMetric(
   return { metric: metricName, ok: errors.length === 0, errors };
 }
 
+/**
+ * Validates every metric in a model, returning an array of detailed results
+ * that include circular dependency detection.
+ */
 export function validateAll(model: SemanticModel): ValidationResult[] {
   const cycles = detectCircularDependencies(model);
   const results: ValidationResult[] = [];
@@ -2105,6 +2229,19 @@ function pickDims(row: Row, dims: string[]): Row {
   return out;
 }
 
+/**
+ * Executes a semantic query against an in-memory database using the provided
+ * semantic model. The function handles base-relation selection, joins,
+ * filtering, grouping, metric evaluation, and final frame alignment when
+ * multiple base facts are involved.
+ *
+ * @param env - Execution environment containing the semantic model and the
+ * backing in-memory database.
+ * @param spec - Query specification describing grain, metrics, and filters.
+ * @param options - Optional execution options such as filter bindings.
+ * @returns An array of grouped rows containing requested dimensions and metric
+ * values.
+ */
 export function runSemanticQuery(
   env: { db: InMemoryDb; model: SemanticModel },
   spec: QuerySpec,
