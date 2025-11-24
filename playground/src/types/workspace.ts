@@ -106,6 +106,10 @@ export interface WorkspaceState {
   // Query Results
   queryResults: QueryResult[]
 
+  // Query tab UI state
+  openQueryTabs: string[]
+  queryPanelTabs: Record<string, RightPanelTab>
+
   // UI State
   activeTab: EditorTab | null
   rightPanelTab: RightPanelTab

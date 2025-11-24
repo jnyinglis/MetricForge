@@ -2,7 +2,7 @@ import { useCallback, useRef, useEffect } from 'react'
 import Editor, { OnMount, OnChange } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import { useWorkspaceStore } from '../../hooks/useWorkspaceStore'
-import type { QueryDefinition } from '../../types/workspace'
+import type { QueryDefinition, RightPanelTab } from '../../types/workspace'
 import { parseDsl, getDslCompletions } from '../../utils/parserAdapter'
 import { runQuery } from '../../utils/engineRunner'
 
@@ -17,6 +17,11 @@ export function QueryEditor({ query }: QueryEditorProps) {
   const tables = useWorkspaceStore((state) => state.tables)
   const schema = useWorkspaceStore((state) => state.schema)
   const metrics = useWorkspaceStore((state) => state.metrics)
+  const queryResults = useWorkspaceStore((state) => state.queryResults)
+  const queryPanelTab = useWorkspaceStore(
+    (state) => state.queryPanelTabs[query.name] ?? 'preview'
+  )
+  const setQueryPanelTab = useWorkspaceStore((state) => state.setQueryPanelTab)
 
   const handleEditorMount: OnMount = useCallback(
     (editor, monaco) => {
@@ -192,6 +197,124 @@ export function QueryEditor({ query }: QueryEditorProps) {
     addQueryResult(result)
   }, [query.name, query.dsl, tables, schema, metrics, addQueryResult])
 
+  const panelTabs: Array<{ id: RightPanelTab; label: string }> = [
+    { id: 'preview', label: 'Preview' },
+    { id: 'ast', label: 'AST' },
+    { id: 'errors', label: 'Errors' },
+    { id: 'results', label: 'Results' },
+  ]
+
+  const renderPreview = () => {
+    return (
+      <div>
+        <h4 style={{ marginBottom: 8 }}>Query: {query.name}</h4>
+        <div style={{ fontSize: 12, marginBottom: 8 }}>
+          <strong>Status:</strong>{' '}
+          <span className={`badge ${query.valid ? 'badge-success' : 'badge-error'}`}>
+            {query.valid ? 'Valid' : 'Invalid'}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          Uses metrics: {metrics.length} | schema tables: {schema.facts.length + schema.dimensions.length}
+        </div>
+      </div>
+    )
+  }
+
+  const renderAst = () => {
+    if (!query.dsl) return <div style={{ color: 'var(--text-muted)' }}>No AST available</div>
+
+    const { ast, errors } = parseDsl(query.dsl)
+    if (errors.length > 0 || !ast) {
+      return <div style={{ color: 'var(--error)' }}>Parse error</div>
+    }
+
+    return (
+      <div className="json-preview" style={{ maxHeight: '100%', overflow: 'auto' }}>
+        <pre>{JSON.stringify(ast.queries[0] || {}, null, 2)}</pre>
+      </div>
+    )
+  }
+
+  const renderErrors = () => {
+    if (query.errors.length === 0) {
+      return <div style={{ color: 'var(--success)' }}>No errors</div>
+    }
+
+    return (
+      <div>
+        {query.errors.map((err, i) => (
+          <div key={i} className="problem-item">
+            <span className={`problem-icon ${err.severity === 'error' ? 'error' : 'warning'}`}>
+              {err.severity === 'error' ? '●' : '▲'}
+            </span>
+            <div>
+              <div className="problem-message">{err.message}</div>
+              <div className="problem-location">Line {err.line ?? 1}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const renderResults = () => {
+    const result = queryResults.find((r) => r.queryName === query.name)
+
+    if (!result) {
+      return <div style={{ color: 'var(--text-muted)' }}>No query results yet</div>
+    }
+
+    return (
+      <div>
+        <div style={{ marginBottom: 8, fontSize: 12 }}>
+          <strong>Query:</strong> {result.queryName}
+          <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
+            ({result.executionTime.toFixed(2)}ms)
+          </span>
+        </div>
+
+        {result.error ? (
+          <div style={{ color: 'var(--error)' }}>{result.error}</div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 8, fontSize: 12 }}>
+              <strong>Rows:</strong> {result.rows.length}
+            </div>
+            <div className="table-container">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    {result.columns.map((col) => (
+                      <th key={col}>{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.rows.slice(0, 100).map((row, i) => (
+                    <tr key={i}>
+                      {result.columns.map((col) => (
+                        <td key={col}>
+                          {row[col] === undefined ? (
+                            <span style={{ color: 'var(--text-muted)' }}>null</span>
+                          ) : typeof row[col] === 'number' ? (
+                            (row[col] as number).toLocaleString()
+                          ) : (
+                            String(row[col])
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    )
+  }
+
   // Initial validation
   useEffect(() => {
     if (query.dsl) {
@@ -225,26 +348,52 @@ export function QueryEditor({ query }: QueryEditorProps) {
         </button>
       </div>
 
-      {/* Editor */}
-      <div className="editor-container" style={{ flex: 1 }}>
-        <Editor
-          height="100%"
-          defaultLanguage="query-dsl"
-          theme="query-dsl-dark"
-          value={query.dsl}
-          onChange={handleChange}
-          onMount={handleEditorMount}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 14,
-            lineNumbers: 'on',
-            scrollBeyondLastLine: false,
-            wordWrap: 'on',
-            automaticLayout: true,
-            tabSize: 2,
-            padding: { top: 8, bottom: 8 },
-          }}
-        />
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+        {/* Editor */}
+        <div className="editor-container" style={{ flex: 1 }}>
+          <Editor
+            height="100%"
+            defaultLanguage="query-dsl"
+            theme="query-dsl-dark"
+            value={query.dsl}
+            onChange={handleChange}
+            onMount={handleEditorMount}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 14,
+              lineNumbers: 'on',
+              scrollBeyondLastLine: false,
+              wordWrap: 'on',
+              automaticLayout: true,
+              tabSize: 2,
+              padding: { top: 8, bottom: 8 },
+            }}
+          />
+        </div>
+
+        {/* Inline panel */}
+        <div className="query-panel">
+          <div className="panel-tabs">
+            {panelTabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={`panel-tab ${queryPanelTab === tab.id ? 'active' : ''}`}
+                onClick={() => setQueryPanelTab(query.name, tab.id)}
+              >
+                {tab.label}
+                {tab.id === 'errors' && query.errors.length > 0 && (
+                  <span style={{ marginLeft: 4 }}>({query.errors.length})</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="panel-content query-panel-content">
+            {queryPanelTab === 'preview' && renderPreview()}
+            {queryPanelTab === 'ast' && renderAst()}
+            {queryPanelTab === 'errors' && renderErrors()}
+            {queryPanelTab === 'results' && renderResults()}
+          </div>
+        </div>
       </div>
 
       {/* Help */}
