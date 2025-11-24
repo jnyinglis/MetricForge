@@ -114,3 +114,92 @@ query sales_by_region {
 * `promo_sales` illustrates a metric-level filter that applies before aggregation and supports bindings.
 * The query block mixes dimensions, multiple metrics, `where` filters, and `having` clauses.
 * `:year`, `:region`, `:minDiscount`, and `:minMargin` are binding placeholders resolved from the caller-supplied bindings object.
+
+### API usage matching the DSL example
+
+The same DSL can be executed through the SemanticEngine API. Load the schema and DSL text, fetch the parsed query, and pass the
+binding values through `runSemanticQuery`:
+
+```ts
+import { runSemanticQuery, SemanticEngine } from "../src/semanticEngine";
+
+// Schema must align with the DSL above (e.g., `fact_sales`, `region`, etc.).
+const engine = SemanticEngine.fromSchema(schema, db).useDslFile(dsl);
+const spec = engine.getQuery("sales_by_region");
+
+const rows = runSemanticQuery(
+  { db, model: engine.getModel() },
+  spec,
+  {
+    bindings: {
+      year: 2025,
+      region: "west",
+      minDiscount: 5,
+      minMargin: 0.12,
+    },
+  }
+);
+
+console.log(rows);
+```
+
+This flow reuses the parsed DSL definitions, substitutes bindings, and runs the query against the in-memory database.
+
+### Fluent API equivalent
+
+You can create the same metrics and query without the DSL by chaining the SemanticEngine’s fluent helpers. Metrics are built
+with the `Expr` constructors and standard helpers like `aggregateMetric`, filters use `f`, and `runQuery` accepts the same
+binding shape:
+
+```ts
+import {
+  aggregateMetric,
+  buildMetricFromExpr,
+  Expr,
+  f,
+  SemanticEngine,
+} from "../src/semanticEngine";
+
+const engine = SemanticEngine.fromSchema(schema, db)
+  .registerMetric(aggregateMetric("gross_sales", "fact_sales", "sales_amount"))
+  .registerMetric(
+    buildMetricFromExpr({
+      name: "net_sales",
+      baseFact: "fact_sales",
+      expr: Expr.sub(Expr.sum("sales_amount"), Expr.sum("discount")),
+    })
+  )
+  .registerMetric(
+    buildMetricFromExpr({
+      name: "promo_sales",
+      baseFact: "fact_sales",
+      expr: Expr.sum("sales_amount"),
+    })
+  )
+  .registerMetric(
+    buildMetricFromExpr({
+      name: "margin_pct",
+      baseFact: "fact_sales",
+      expr: Expr.div(Expr.metric("net_sales"), Expr.metric("gross_sales")),
+    })
+  );
+
+engine.registerQuery("sales_by_region", {
+  dimensions: ["region", "product_category"],
+  metrics: ["gross_sales", "net_sales", "promo_sales", "margin_pct"],
+  where: f.and(f.eq("year", ":year"), f.eq("region", ":region")),
+  having: f.gte("margin_pct", ":minMargin"),
+});
+
+const rows = engine.runQuery("sales_by_region", {
+  year: 2025,
+  region: "west",
+  minDiscount: 5,
+  minMargin: 0.12,
+});
+
+console.log(rows);
+```
+
+This programmatic setup mirrors the DSL example, including binding substitution and the same dimensions, metrics, filters, and
+having clause.
