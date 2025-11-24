@@ -88,7 +88,7 @@ export type EditorTab =
   | { type: 'metric'; metricName: string }
   | { type: 'query'; queryName: string }
 
-export type RightPanelTab = 'preview' | 'ast' | 'errors' | 'results'
+export type RightPanelTab = 'preview' | 'ast' | 'plan' | 'errors' | 'results'
 
 export interface WorkspaceState {
   // Data

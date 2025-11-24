@@ -1,6 +1,8 @@
 import { useWorkspaceStore } from '../hooks/useWorkspaceStore'
 import type { RightPanelTab } from '../types/workspace'
 import { parseDsl } from '../utils/parserAdapter'
+import { buildLogicalPlan } from '../utils/logicalPlanBuilder'
+import { PlanVisualizer, PlanTextView } from './PlanVisualizer'
 
 export function RightPanel() {
   const activeTab = useWorkspaceStore((state) => state.activeTab)
@@ -16,6 +18,7 @@ export function RightPanel() {
   const tabs: Array<{ id: RightPanelTab; label: string }> = [
     { id: 'preview', label: 'Preview' },
     { id: 'ast', label: 'AST' },
+    { id: 'plan', label: 'Plan' },
     { id: 'errors', label: 'Errors' },
   ]
 
@@ -152,6 +155,44 @@ export function RightPanel() {
     return <div style={{ color: 'var(--text-muted)' }}>AST not available for this item</div>
   }
 
+  const renderPlan = () => {
+    if (!activeTab) return <div style={{ color: 'var(--text-muted)' }}>No selection</div>
+
+    if (activeTab.type === 'query') {
+      const query = queries.find((q) => q.name === activeTab.queryName)
+      if (!query || !query.dsl) return <div>No query selected</div>
+
+      const { ast, errors } = parseDsl(query.dsl)
+      if (errors.length > 0 || !ast || ast.queries.length === 0) {
+        return <div style={{ color: 'var(--error)' }}>Parse error - cannot build plan</div>
+      }
+
+      const querySpec = ast.queries[0].spec
+
+      try {
+        const plan = buildLogicalPlan(querySpec, schema, metrics)
+        return <PlanVisualizer plan={plan} />
+      } catch (e) {
+        return (
+          <div style={{ color: 'var(--error)' }}>
+            Error building plan: {e instanceof Error ? e.message : 'Unknown error'}
+          </div>
+        )
+      }
+    }
+
+    if (activeTab.type === 'metric') {
+      return (
+        <div style={{ color: 'var(--text-muted)' }}>
+          <p>Logical plan visualization is available for queries.</p>
+          <p style={{ marginTop: 8 }}>Select a query to see its execution plan.</p>
+        </div>
+      )
+    }
+
+    return <div style={{ color: 'var(--text-muted)' }}>Plan not available for this item</div>
+  }
+
   const renderErrors = () => {
     const allErrors: Array<{ source: string; message: string; severity: string }> = []
 
@@ -212,6 +253,7 @@ export function RightPanel() {
       <div className="panel-content">
         {activePanelTab === 'preview' && renderPreview()}
         {activePanelTab === 'ast' && renderAst()}
+        {activePanelTab === 'plan' && renderPlan()}
         {activePanelTab === 'errors' && renderErrors()}
       </div>
     </div>
