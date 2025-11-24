@@ -15,11 +15,19 @@ Comparator      ::= '>=' | '<=' | '>' | '<' | '==' | '!='
 
 ```
 DslFile         ::= { MetricDecl | QueryDecl }
-MetricDecl      ::= 'metric' Identifier 'on' Identifier '=' Expr
+MetricDecl      ::= 'metric' Identifier 'on' Identifier [ 'where' BoolExpr ] '=' Expr
 QueryDecl       ::= 'query' Identifier '{' QueryLine+ '}'
-``` 
+```
 
 A DSL file is a sequence of metric declarations and query blocks. Parsing stops when neither construct matches.
+
+### Metric-level filters
+
+Metric declarations may include an inline `where` clause that restricts the fact rows contributing to the metric before any aggregation or downstream composition. The `BoolExpr` grammar used here matches the query-level `where` grammar below and therefore supports numeric literals and binding placeholders.
+
+```
+MetricDecl      ::= 'metric' Identifier 'on' Identifier [ 'where' BoolExpr ] '=' Expr
+```
 
 ## Metric expressions
 
@@ -91,16 +99,18 @@ The snippet below demonstrates the full DSL surface area, including metrics, que
 ```
 metric gross_sales on fact_sales = sum(sales_amount)
 metric net_sales   on fact_sales = sum(sales_amount) - sum(discount)
+metric promo_sales on fact_sales where discount > :minDiscount = sum(sales_amount)
 metric margin_pct  on fact_sales = net_sales / gross_sales
 
 query sales_by_region {
   dimensions: region, product_category
-  metrics:    gross_sales, net_sales, margin_pct
+  metrics:    gross_sales, net_sales, promo_sales, margin_pct
   where:      year == :year and region == :region
   having:     margin_pct >= :minMargin
 }
 ```
 
 * Metric declarations show arithmetic expressions and aggregation helpers.
+* `promo_sales` illustrates a metric-level filter that applies before aggregation and supports bindings.
 * The query block mixes dimensions, multiple metrics, `where` filters, and `having` clauses.
-* `:year`, `:region`, and `:minMargin` are binding placeholders resolved from the caller-supplied bindings object.
+* `:year`, `:region`, `:minDiscount`, and `:minMargin` are binding placeholders resolved from the caller-supplied bindings object.
