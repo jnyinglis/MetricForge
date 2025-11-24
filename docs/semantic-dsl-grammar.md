@@ -86,7 +86,7 @@ HavingLine      ::= 'having' ':' HavingExpr
 IdentList       ::= Identifier (',' Identifier)*
 ```
 
-A `query` block must include both a `dimensions` line and a `metrics` line. `where` and `having` are optional. Lines repeat until the closing `}` is encountered.
+A `query` block may omit `dimensions` or `metrics` (e.g., metric-less or dimension-less queries are valid), while `where` and `having` remain optional. Lines repeat until the closing `}` is encountered.
 
 ## Whitespace and delimiters
 
