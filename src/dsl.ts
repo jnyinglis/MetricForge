@@ -8,7 +8,24 @@ import {
   buildMetricFromExpr,
 } from "./semanticEngine";
 
+/**
+ * Result of a parser invocation.
+ *
+ * The generic parser combinators in this module return {@link ParseResult}
+ * objects so callers know both the parsed value and the character offset where
+ * parsing should continue. Returning `null` signals that the parser did not
+ * match at the requested position.
+ */
 export type ParseResult<T> = { value: T; nextPos: number };
+
+/**
+ * Generic parser signature used by the DSL combinators.
+ *
+ * A parser consumes input starting at the provided position and either
+ * produces a {@link ParseResult} or `null` to indicate failure without
+ * advancing. Parsers are pure and do not maintain any hidden state, which makes
+ * them easy to compose using the helpers below.
+ */
 export type Parser<T> = (input: string, pos: number) => ParseResult<T> | null;
 
 function skipWs(input: string, pos: number): number {
@@ -159,9 +176,18 @@ function parens<T>(parser: Parser<T>): Parser<T> {
  * AST TYPES
  * -------------------------------------------------------------------------- */
 
+/**
+ * Parsed representation of a `metric` declaration in the DSL.
+ *
+ * This intermediate form is validated and then converted to runtime metric
+ * definitions after the full file has been parsed.
+ */
 export interface MetricDeclAst {
+  /** Metric identifier as written in the DSL file. */
   name: string;
+  /** Optional base fact table supplied via `metric <name> on <fact>`. */
   baseFact?: string;
+  /** Expression tree that defines the metric. */
   expr: MetricExpr;
 }
 
@@ -169,13 +195,23 @@ export type MetricHavingAst =
   | { kind: "MetricCmp"; metric: string; op: ">" | ">=" | "<" | "<=" | "==" | "!="; value: number }
   | { kind: "And" | "Or"; items: MetricHavingAst[] };
 
+/**
+ * Parsed representation of a `query` block in the DSL file.
+ */
 export interface QueryAst {
+  /** Name used to register the query in the semantic engine. */
   name: string;
+  /** Raw query specification assembled from the block contents. */
   spec: QuerySpecV2;
 }
 
+/**
+ * Top-level AST produced by parsing a DSL file.
+ */
 export interface DslFileAst {
+  /** Metric declarations encountered in the file. */
   metrics: MetricDeclAst[];
+  /** Query declarations encountered in the file. */
   queries: QueryAst[];
 }
 
@@ -261,6 +297,9 @@ const argList: Parser<MetricExpr[]> = sepBy(expr, symbol(","));
  * METRIC DECL PARSER
  * -------------------------------------------------------------------------- */
 
+/**
+ * Parse a single `metric` declaration starting at the provided position.
+ */
 export const metricDecl: Parser<MetricDeclAst> = map(
   seq(keyword("metric"), identifier, keyword("on"), identifier, symbol("="), expr),
   ([, name, , baseFact, , expression]) => ({ name, baseFact, expr: expression })
@@ -341,6 +380,9 @@ const queryLine: Parser<any> = choice<any>(
   havingLine as Parser<any>
 );
 
+/**
+ * Parse a `query` block including its dimensions, metrics, and optional clauses.
+ */
 export const queryDecl: Parser<QueryAst> = (input, pos) => {
   const header = seq(keyword("query"), identifier, symbol("{"));
   const headResult = header(input, pos);
@@ -446,6 +488,9 @@ export function validateMetricExpr(expr: MetricExpr): void {
  * FILE PARSER + COMPILATION ENTRY POINTS
  * -------------------------------------------------------------------------- */
 
+/**
+ * Parse an entire DSL file consisting of metric and query declarations.
+ */
 const fileParser: Parser<DslFileAst> = (input, pos) => {
   let nextPos = skipWs(input, pos);
   const metrics: MetricDeclAst[] = [];
@@ -471,6 +516,12 @@ const fileParser: Parser<DslFileAst> = (input, pos) => {
   return { value: { metrics, queries }, nextPos };
 };
 
+/**
+ * Parse a complete DSL document from raw text.
+ *
+ * @param text - Source string containing metric and query declarations.
+ * @throws Error when parsing fails or extra trailing content remains.
+ */
 export function parseDsl(text: string): DslFileAst {
   const result = fileParser(text, 0);
   if (!result || skipWs(text, result.nextPos) !== text.length) {
@@ -479,11 +530,23 @@ export function parseDsl(text: string): DslFileAst {
   return result.value;
 }
 
+/**
+ * Result of compiling a DSL file into runtime structures.
+ */
 export interface DslCompileResult {
+  /** Updated semantic model with any new metrics applied. */
   model: SemanticModel;
+  /** Query registry extracted from the file. */
   queries: Record<string, QuerySpecV2>;
 }
 
+/**
+ * Compile DSL text into an updated semantic model and query registry.
+ *
+ * @param text - DSL content to parse.
+ * @param baseModel - Existing semantic model to merge new declarations into.
+ * @returns Updated model and the queries parsed from the file.
+ */
 export function compileDslToModel(
   text: string,
   baseModel: SemanticModel
@@ -522,6 +585,12 @@ export function compileDslToModel(
   return { model, queries };
 }
 
+/**
+ * Helper that runs the given parser against the full input string.
+ *
+ * This is useful for unit tests that need to assert full consumption of the
+ * input rather than partial matches.
+ */
 export function parseAll<T>(parser: Parser<T>, input: string): T {
   const result = parser(input, 0);
   if (!result) throw new Error("Parse failed");
@@ -531,6 +600,12 @@ export function parseAll<T>(parser: Parser<T>, input: string): T {
   return result.value;
 }
 
+/**
+ * Convert a parsed having clause into an executable predicate.
+ *
+ * The returned function expects a map of metric names to computed values and
+ * returns `true` when the row passes the having filter.
+ */
 export function compileHaving(ast: MetricHavingAst): (values: Record<string, number | undefined>) => boolean {
   return (values) => evalHaving(ast, values);
 }
