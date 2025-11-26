@@ -16,11 +16,15 @@ export function Sidebar() {
   const removeMetric = useWorkspaceStore((state) => state.removeMetric)
   const removeQuery = useWorkspaceStore((state) => state.removeQuery)
   const removeTable = useWorkspaceStore((state) => state.removeTable)
+  const addTable = useWorkspaceStore((state) => state.addTable)
 
   const [showNewMetricInput, setShowNewMetricInput] = useState(false)
   const [showNewQueryInput, setShowNewQueryInput] = useState(false)
+  const [showNewTableInput, setShowNewTableInput] = useState(false)
   const [newMetricName, setNewMetricName] = useState('')
   const [newQueryName, setNewQueryName] = useState('')
+  const [newTableName, setNewTableName] = useState('')
+  const [newTableJson, setNewTableJson] = useState('')
 
   const isTabActive = (tab: EditorTab) => {
     if (!activeTab) return false
@@ -55,6 +59,50 @@ export function Sidebar() {
     }
   }
 
+  const handleAddTable = () => {
+    if (!newTableJson.trim()) {
+      alert('Please provide JSON data')
+      return
+    }
+
+    try {
+      const data = JSON.parse(newTableJson)
+
+      if (Array.isArray(data)) {
+        // Single table: require table name
+        if (!newTableName.trim()) {
+          alert('Please provide a table name for the array data')
+          return
+        }
+        addTable(newTableName.trim(), data)
+        setActiveTab({ type: 'data', tableName: newTableName.trim() })
+      } else if (typeof data === 'object' && data !== null) {
+        // Multiple tables: extract from object keys
+        const entries = Object.entries(data)
+        const arrayEntries = entries.filter(([, v]) => Array.isArray(v))
+
+        if (arrayEntries.length === 0) {
+          alert('JSON must be an array of objects or an object with array properties')
+          return
+        }
+
+        arrayEntries.forEach(([key, value]) => {
+          addTable(key, value as Record<string, unknown>[])
+        })
+        setActiveTab({ type: 'data', tableName: arrayEntries[0][0] })
+      } else {
+        alert('JSON must be an array of objects or an object with array properties')
+        return
+      }
+
+      setNewTableName('')
+      setNewTableJson('')
+      setShowNewTableInput(false)
+    } catch (err) {
+      alert('Invalid JSON: ' + (err instanceof Error ? err.message : String(err)))
+    }
+  }
+
   return (
     <aside className="sidebar">
       {/* Data Section */}
@@ -65,9 +113,58 @@ export function Sidebar() {
         >
           <span>{sidebarExpanded.data ? '▼' : '▶'}</span>
           <span>DATA ({tables.length})</span>
+          <button
+            className="btn btn-sm"
+            style={{ marginLeft: 'auto', padding: '2px 6px', fontSize: 11 }}
+            onClick={(e) => {
+              e.stopPropagation()
+              setShowNewTableInput(true)
+            }}
+          >
+            +
+          </button>
         </div>
         {sidebarExpanded.data && (
           <div className="sidebar-section-content">
+            {showNewTableInput && (
+              <div style={{ padding: '8px', backgroundColor: 'var(--bg-secondary)', borderRadius: 4, marginBottom: 8 }}>
+                <div style={{ marginBottom: 8 }}>
+                  <input
+                    type="text"
+                    className="form-input"
+                    style={{ width: '100%', padding: '4px 8px', fontSize: 12 }}
+                    placeholder="Table name (optional for object with keys)"
+                    value={newTableName}
+                    onChange={(e) => setNewTableName(e.target.value)}
+                  />
+                </div>
+                <div style={{ marginBottom: 8 }}>
+                  <textarea
+                    className="form-textarea"
+                    style={{ width: '100%', padding: '4px 8px', fontSize: 11, fontFamily: 'monospace' }}
+                    placeholder='[{"id": 1, "name": "test"}] or {"table1": [...], "table2": [...]}'
+                    value={newTableJson}
+                    onChange={(e) => setNewTableJson(e.target.value)}
+                    rows={4}
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button className="btn btn-sm btn-primary" onClick={handleAddTable}>
+                    Add
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setShowNewTableInput(false)
+                      setNewTableName('')
+                      setNewTableJson('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             {tables.map((table) => (
               <div
                 key={table.name}
@@ -88,7 +185,7 @@ export function Sidebar() {
                 </span>
               </div>
             ))}
-            {tables.length === 0 && (
+            {tables.length === 0 && !showNewTableInput && (
               <div className="sidebar-item" style={{ color: 'var(--text-muted)' }}>
                 No tables loaded
               </div>

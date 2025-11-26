@@ -63,19 +63,41 @@ export function WelcomeScreen() {
   }
 
   const handlePasteJson = () => {
-    if (!jsonInput.trim() || !tableName.trim()) {
-      alert('Please provide both table name and JSON data')
+    if (!jsonInput.trim()) {
+      alert('Please provide JSON data')
       return
     }
 
     try {
       const data = JSON.parse(jsonInput)
-      if (!Array.isArray(data)) {
-        alert('JSON must be an array of objects')
+
+      if (Array.isArray(data)) {
+        // Single table: require table name
+        if (!tableName.trim()) {
+          alert('Please provide a table name for the array data')
+          return
+        }
+        addTable(tableName.trim(), data)
+        setActiveTab({ type: 'data', tableName: tableName.trim() })
+      } else if (typeof data === 'object' && data !== null) {
+        // Multiple tables: extract from object keys
+        const entries = Object.entries(data)
+        const arrayEntries = entries.filter(([, v]) => Array.isArray(v))
+
+        if (arrayEntries.length === 0) {
+          alert('JSON must be an array of objects or an object with array properties')
+          return
+        }
+
+        arrayEntries.forEach(([key, value]) => {
+          addTable(key, value as Record<string, unknown>[])
+        })
+        setActiveTab({ type: 'data', tableName: arrayEntries[0][0] })
+      } else {
+        alert('JSON must be an array of objects or an object with array properties')
         return
       }
-      addTable(tableName.trim(), data)
-      setActiveTab({ type: 'data', tableName: tableName.trim() })
+
       setJsonInput('')
       setTableName('')
       setShowJsonInput(false)
