@@ -119,4 +119,9 @@ export interface WorkspaceState {
     metrics: boolean
     queries: boolean
   }
+
+  // UI Preferences
+  theme: 'light' | 'dark'
+  sidebarCollapsed: boolean
+  rightPanelCollapsed: boolean
 }

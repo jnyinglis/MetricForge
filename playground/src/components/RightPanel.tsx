@@ -232,7 +232,7 @@ export function RightPanel() {
   }
 
   return (
-    <div className="right-panel">
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div className="panel-tabs">
         {tabs.map((tab) => (
           <div
