@@ -58,6 +58,12 @@ interface WorkspaceActions {
   closeQueryTab: (queryName: string) => void
   toggleSidebarSection: (section: keyof WorkspaceState['sidebarExpanded']) => void
 
+  // UI Preference actions
+  toggleTheme: () => void
+  setTheme: (theme: 'light' | 'dark') => void
+  toggleSidebarCollapsed: () => void
+  toggleRightPanelCollapsed: () => void
+
   // Import/Export actions
   exportWorkspace: () => WorkspaceExport
   importWorkspace: (workspace: WorkspaceExport) => void
@@ -114,6 +120,9 @@ const initialState: WorkspaceState = {
     metrics: true,
     queries: true,
   },
+  theme: 'dark',
+  sidebarCollapsed: false,
+  rightPanelCollapsed: false,
 }
 
 export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
@@ -360,6 +369,23 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
             [section]: !state.sidebarExpanded[section],
           },
         }))
+      },
+
+      // UI Preference actions
+      toggleTheme: () => {
+        set((state) => ({ theme: state.theme === 'light' ? 'dark' : 'light' }))
+      },
+
+      setTheme: (theme) => {
+        set({ theme })
+      },
+
+      toggleSidebarCollapsed: () => {
+        set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed }))
+      },
+
+      toggleRightPanelCollapsed: () => {
+        set((state) => ({ rightPanelCollapsed: !state.rightPanelCollapsed }))
       },
 
       // Import/Export

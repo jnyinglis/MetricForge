@@ -104,7 +104,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="sidebar">
+    <aside style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Data Section */}
       <div className="sidebar-section">
         <div

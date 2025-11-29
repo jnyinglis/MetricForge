@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useEffect } from 'react'
 import { useWorkspaceStore } from '../hooks/useWorkspaceStore'
 
 export function Header() {
@@ -6,6 +6,13 @@ export function Header() {
   const exportWorkspace = useWorkspaceStore((state) => state.exportWorkspace)
   const importWorkspace = useWorkspaceStore((state) => state.importWorkspace)
   const resetWorkspace = useWorkspaceStore((state) => state.resetWorkspace)
+  const theme = useWorkspaceStore((state) => state.theme)
+  const toggleTheme = useWorkspaceStore((state) => state.toggleTheme)
+
+  // Apply theme to document root
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
 
   const handleExport = () => {
     const workspace = exportWorkspace()
@@ -49,6 +56,13 @@ export function Header() {
     <header className="header">
       <div className="header-title">Semantic Engine Playground</div>
       <div className="header-actions">
+        <button
+          className="theme-toggle"
+          onClick={toggleTheme}
+          title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+        >
+          {theme === 'light' ? '🌙' : '☀️'}
+        </button>
         <button className="btn btn-sm" onClick={handleImport}>
           Import
         </button>
