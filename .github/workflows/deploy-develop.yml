@@ -1,8 +1,12 @@
-name: Deploy develop to GitHub Pages
+name: Deploy preview branches to GitHub Pages
 
 on:
   push:
-    branches: ['develop']
+    branches:
+      - 'develop'
+      - 'codex/**'
+      - 'claude/**'
+      - 'poc/**'
   workflow_dispatch:
 
 permissions:
@@ -30,16 +34,23 @@ jobs:
         working-directory: ./playground
         run: npm ci
 
-      - name: Build playground with develop base
-        working-directory: ./playground
-        run: npm run build -- --base=/MetricForge/develop/
+      - name: Set deployment variables
+        id: vars
+        run: |
+          DEPLOY_DIR="${GITHUB_REF_NAME}"
+          echo "deploy_dir=${DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+          echo "base_path=/MetricForge/${DEPLOY_DIR}/" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy to gh-pages/develop
+      - name: Build playground with branch base
+        working-directory: ./playground
+        run: npm run build -- --base=${{ steps.vars.outputs.base_path }}
+
+      - name: Deploy to gh-pages branch folder
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
           publish_dir: playground/dist
-          destination_dir: develop
+          destination_dir: ${{ steps.vars.outputs.deploy_dir }}
           keep_files: true
           enable_jekyll: false

@@ -649,47 +649,48 @@ npx tsc --noEmit
 
 ### GitHub Pages
 
-The repository includes GitHub Actions workflows for automatic deployment of both the `main` and `develop` branches.
+The repository includes GitHub Actions workflows for automatic deployment of `main`, `develop`, and preview branches used by the team.
 
 **Workflows**:
 - `.github/workflows/deploy-main.yml` (push to `main`, manual dispatch)
-- `.github/workflows/deploy-develop.yml` (push to `develop`, manual dispatch)
+- `.github/workflows/deploy-develop.yml` (push to `develop`, `codex/**`, `claude/**`, or `poc/**`, manual dispatch)
 
 **Process (both workflows)**:
 1. Checkout code
 2. Install dependencies from `playground/package-lock.json`
-3. Build the playground (`develop` adds `--base=/MetricForge/develop/`)
+3. Build the playground (`develop` and preview branches add a branch-specific `--base` flag)
 4. Publish `playground/dist/` to the `gh-pages` branch via `peaceiris/actions-gh-pages`
 
-### Hosting both `main` and `develop`
+### Hosting main, develop, and previews
 
-GitHub Pages can only serve one site per repository, so hosting two branches side-by-side requires publishing both builds into the **same** `gh-pages` branch under different folders.
+GitHub Pages can only serve one site per repository, so hosting multiple environments side-by-side requires publishing all builds into the **same** `gh-pages` branch under different folders.
 
 Recommended approach:
 
 1. **Build with distinct base paths**
    - `main`: keep the current Vite base of `/MetricForge/`.
-   - `develop`: override the base, e.g. `npm run build -- --base=/MetricForge/develop/`, so assets resolve when served from `.../MetricForge/develop/`.
-   - If you prefer not to pass CLI flags, set `VITE_BASE=/MetricForge/develop/` and read it inside `vite.config.ts`.
+   - `develop`: override the base, e.g. `npm run build -- --base=/MetricForge/develop/`, so assets resolve when served from `/MetricForge/develop/`.
+   - `codex/*`, `claude/*`, `poc/*`: override the base dynamically with the branch name, e.g. `npm run build -- --base=/MetricForge/codex/my-feature/`.
+   - If you prefer not to pass CLI flags, set `VITE_BASE=/MetricForge/<branch>/` and read it inside `vite.config.ts`.
 
 2. **Publish into separate folders**
    - Use a deployment action that can write to subdirectories (e.g. `peaceiris/actions-gh-pages`).
    - Main workflow publishes the `playground/dist` output to the root of the `gh-pages` branch.
-   - A second workflow, triggered by pushes to `develop`, publishes its build to `gh-pages` under `develop/` (use `destination_dir: develop`).
-   - Both workflows should set `keep_files: true` to avoid one job deleting the other folder when pushing to `gh-pages`.
+   - Preview workflow, triggered by pushes to `develop`, `codex/*`, `claude/*`, or `poc/*`, publishes its build to `gh-pages` under a folder that matches the branch name (for example `destination_dir: codex/my-feature`).
+   - Both workflows should set `keep_files: true` to avoid one job deleting another folder when pushing to `gh-pages`.
 
-3. **Example dual-workflow setup**
+3. **Example multi-workflow setup**
    - **Main** (`.github/workflows/deploy-main.yml`): trigger on `push` to `main`; run `npm ci`, `npm run build`; deploy with `destination_dir: .` and `publish_dir: playground/dist`.
-   - **Develop** (`.github/workflows/deploy-develop.yml`): trigger on `push` to `develop`; run `npm ci`, `npm run build -- --base=/MetricForge/develop/`; deploy with `destination_dir: develop` and `publish_dir: playground/dist`.
+   - **Develop/preview** (`.github/workflows/deploy-develop.yml`): trigger on `push` to `develop` or any `codex/*`, `claude/*`, or `poc/*` branch; run `npm ci`, `npm run build -- --base=/MetricForge/<branch>/`; deploy with `destination_dir: <branch>` and `publish_dir: playground/dist`.
    - Use the same `deploy` secret (token) for both; `peaceiris/actions-gh-pages` handles creating/updating the `gh-pages` branch.
 
-4. **Keep both versions live**
+4. **Keep multiple versions live**
    - Main site stays at `https://<username>.github.io/MetricForge/`.
-   - Develop preview is reachable at `https://<username>.github.io/MetricForge/develop/` without overwriting the main build.
+   - Branch previews are reachable at `https://<username>.github.io/MetricForge/<branch>/` without overwriting the main build.
 
 5. **Optional hardening**
-   - Gate the develop deployment behind branch protection or environment approvals.
-   - Add cache-busting headers or suffixes if you expect frequent force-pushes on `develop`.
+   - Gate preview deployments behind branch protection or environment approvals.
+   - Add cache-busting headers or suffixes if you expect frequent force-pushes on preview branches.
 
 ### Manual Deployment
 
