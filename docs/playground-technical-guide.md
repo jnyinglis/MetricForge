@@ -663,6 +663,36 @@ The repository includes a GitHub Actions workflow for automatic deployment.
 3. Build playground
 4. Upload to GitHub Pages
 
+### Hosting both `main` and `develop`
+
+GitHub Pages can only serve one site per repository, so hosting two branches side-by-side requires publishing both builds into the **same** `gh-pages` branch under different folders.
+
+Recommended approach:
+
+1. **Build with distinct base paths**
+   - `main`: keep the current Vite base of `/MetricForge/`.
+   - `develop`: override the base, e.g. `npm run build -- --base=/MetricForge/develop/`, so assets resolve when served from `.../MetricForge/develop/`.
+   - If you prefer not to pass CLI flags, set `VITE_BASE=/MetricForge/develop/` and read it inside `vite.config.ts`.
+
+2. **Publish into separate folders**
+   - Use a deployment action that can write to subdirectories (e.g. `peaceiris/actions-gh-pages`).
+   - Main workflow publishes the `playground/dist` output to the root of the `gh-pages` branch.
+   - A second workflow, triggered by pushes to `develop`, publishes its build to `gh-pages` under `develop/` (use `destination_dir: develop`).
+   - Both workflows should set `keep_files: true` to avoid one job deleting the other folder when pushing to `gh-pages`.
+
+3. **Example dual-workflow setup**
+   - **Main** (`.github/workflows/deploy-main.yml`): trigger on `push` to `main`; run `npm ci`, `npm run build`; deploy with `destination_dir: .` and `publish_dir: playground/dist`.
+   - **Develop** (`.github/workflows/deploy-develop.yml`): trigger on `push` to `develop`; run `npm ci`, `npm run build -- --base=/MetricForge/develop/`; deploy with `destination_dir: develop` and `publish_dir: playground/dist`.
+   - Use the same `deploy` secret (token) for both; `peaceiris/actions-gh-pages` handles creating/updating the `gh-pages` branch.
+
+4. **Keep both versions live**
+   - Main site stays at `https://<username>.github.io/MetricForge/`.
+   - Develop preview is reachable at `https://<username>.github.io/MetricForge/develop/` without overwriting the main build.
+
+5. **Optional hardening**
+   - Gate the develop deployment behind branch protection or environment approvals.
+   - Add cache-busting headers or suffixes if you expect frequent force-pushes on `develop`.
+
 ### Manual Deployment
 
 ```bash
