@@ -1,0 +1,45 @@
+name: Deploy develop to GitHub Pages
+
+on:
+  push:
+    branches: ['develop']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: playground/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./playground
+        run: npm ci
+
+      - name: Build playground with develop base
+        working-directory: ./playground
+        run: npm run build -- --base=/MetricForge/develop/
+
+      - name: Deploy to gh-pages/develop
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: playground/dist
+          destination_dir: develop
+          keep_files: true
+          enable_jekyll: false

@@ -649,19 +649,17 @@ npx tsc --noEmit
 
 ### GitHub Pages
 
-The repository includes a GitHub Actions workflow for automatic deployment.
+The repository includes GitHub Actions workflows for automatic deployment of both the `main` and `develop` branches.
 
-**Workflow**: `.github/workflows/deploy.yml`
+**Workflows**:
+- `.github/workflows/deploy-main.yml` (push to `main`, manual dispatch)
+- `.github/workflows/deploy-develop.yml` (push to `develop`, manual dispatch)
 
-**Triggers**:
-- Push to `main` branch
-- Manual dispatch
-
-**Process**:
+**Process (both workflows)**:
 1. Checkout code
-2. Install dependencies
-3. Build playground
-4. Upload to GitHub Pages
+2. Install dependencies from `playground/package-lock.json`
+3. Build the playground (`develop` adds `--base=/MetricForge/develop/`)
+4. Publish `playground/dist/` to the `gh-pages` branch via `peaceiris/actions-gh-pages`
 
 ### Hosting both `main` and `develop`
 
