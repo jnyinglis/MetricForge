@@ -10,89 +10,47 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: 'pages'
   cancel-in-progress: true
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current branch
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: preview-branch
-
-      - name: Checkout main branch
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-branch
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: main-branch/playground/package-lock.json
+          cache-dependency-path: playground/package-lock.json
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Create output directory
-        run: mkdir -p output
-
-      # Build main branch at root
-      - name: Install dependencies (main)
-        working-directory: ./main-branch/playground
+      - name: Install dependencies
+        working-directory: ./playground
         run: npm ci
 
-      - name: Build main branch
-        working-directory: ./main-branch/playground
-        run: npm run build
-
-      - name: Copy main build to output root
-        run: cp -r main-branch/playground/dist/* output/
-
-      # Build preview branch in subdirectory
-      - name: Set preview variables
+      - name: Set deployment variables
         id: vars
         run: |
-          # Sanitize branch name for directory (replace / with -)
-          BRANCH_NAME="${GITHUB_REF_NAME}"
-          SAFE_DIR=$(echo "$BRANCH_NAME" | tr '/' '-')
-          echo "preview_dir=${SAFE_DIR}" >> "$GITHUB_OUTPUT"
-          echo "base_path=/MetricForge/${SAFE_DIR}/" >> "$GITHUB_OUTPUT"
+          DEPLOY_DIR="${GITHUB_REF_NAME}"
+          echo "deploy_dir=${DEPLOY_DIR}" >> "$GITHUB_OUTPUT"
+          echo "base_path=/MetricForge/${DEPLOY_DIR}/" >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (preview)
-        working-directory: ./preview-branch/playground
-        run: npm ci
-
-      - name: Build preview branch
-        working-directory: ./preview-branch/playground
+      - name: Build playground with branch base
+        working-directory: ./playground
         run: npm run build -- --base=${{ steps.vars.outputs.base_path }}
 
-      - name: Copy preview build to subdirectory
-        run: |
-          mkdir -p "output/${{ steps.vars.outputs.preview_dir }}"
-          cp -r preview-branch/playground/dist/* "output/${{ steps.vars.outputs.preview_dir }}/"
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Deploy to gh-pages branch folder
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: output
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: playground/dist
+          destination_dir: ${{ steps.vars.outputs.deploy_dir }}
+          keep_files: true
+          enable_jekyll: false
