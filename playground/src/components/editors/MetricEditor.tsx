@@ -11,13 +11,16 @@ interface MetricEditorProps {
 
 export function MetricEditor({ metric }: MetricEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
   const updateMetric = useWorkspaceStore((state) => state.updateMetric)
   const schema = useWorkspaceStore((state) => state.schema)
   const metrics = useWorkspaceStore((state) => state.metrics)
+  const theme = useWorkspaceStore((state) => state.theme)
 
   const handleEditorMount: OnMount = useCallback(
     (editor, monaco) => {
       editorRef.current = editor
+      monacoRef.current = monaco
 
       // Register DSL language
       monaco.languages.register({ id: 'metric-dsl' })
@@ -53,7 +56,7 @@ export function MetricEditor({ metric }: MetricEditorProps) {
         },
       })
 
-      // Define theme
+      // Define dark theme
       monaco.editor.defineTheme('metric-dsl-dark', {
         base: 'vs-dark',
         inherit: true,
@@ -72,7 +75,28 @@ export function MetricEditor({ metric }: MetricEditorProps) {
         },
       })
 
-      monaco.editor.setTheme('metric-dsl-dark')
+      // Define light theme
+      monaco.editor.defineTheme('metric-dsl-light', {
+        base: 'vs',
+        inherit: true,
+        rules: [
+          { token: 'keyword', foreground: '0000FF', fontStyle: 'bold' },
+          { token: 'function', foreground: '795E26' },
+          { token: 'number', foreground: '098658' },
+          { token: 'string', foreground: 'A31515' },
+          { token: 'identifier', foreground: '001080' },
+          { token: 'operator', foreground: '000000' },
+          { token: 'delimiter', foreground: '000000' },
+          { token: 'comment', foreground: '008000' },
+        ],
+        colors: {
+          'editor.background': '#FFFFFF',
+        },
+      })
+
+      // Set theme based on current workspace theme
+      const currentTheme = useWorkspaceStore.getState().theme
+      monaco.editor.setTheme(currentTheme === 'light' ? 'metric-dsl-light' : 'metric-dsl-dark')
 
       // Register completion provider
       monaco.languages.registerCompletionItemProvider('metric-dsl', {
@@ -176,6 +200,13 @@ export function MetricEditor({ metric }: MetricEditorProps) {
     }
   }, [])
 
+  // Switch Monaco editor theme when workspace theme changes
+  useEffect(() => {
+    if (monacoRef.current) {
+      monacoRef.current.editor.setTheme(theme === 'light' ? 'metric-dsl-light' : 'metric-dsl-dark')
+    }
+  }, [theme])
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Toolbar */}
@@ -203,7 +234,7 @@ export function MetricEditor({ metric }: MetricEditorProps) {
         <Editor
           height="100%"
           defaultLanguage="metric-dsl"
-          theme="metric-dsl-dark"
+          theme={theme === 'light' ? 'metric-dsl-light' : 'metric-dsl-dark'}
           value={metric.dsl}
           onChange={handleChange}
           onMount={handleEditorMount}

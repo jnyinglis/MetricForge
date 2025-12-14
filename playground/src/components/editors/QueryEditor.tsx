@@ -12,6 +12,7 @@ interface QueryEditorProps {
 
 export function QueryEditor({ query }: QueryEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
   const updateQuery = useWorkspaceStore((state) => state.updateQuery)
   const addQueryResult = useWorkspaceStore((state) => state.addQueryResult)
   const tables = useWorkspaceStore((state) => state.tables)
@@ -22,10 +23,12 @@ export function QueryEditor({ query }: QueryEditorProps) {
     (state) => state.queryPanelTabs[query.name] ?? 'preview'
   )
   const setQueryPanelTab = useWorkspaceStore((state) => state.setQueryPanelTab)
+  const theme = useWorkspaceStore((state) => state.theme)
 
   const handleEditorMount: OnMount = useCallback(
     (editor, monaco) => {
       editorRef.current = editor
+      monacoRef.current = monaco
 
       // Register DSL language if not already registered
       const languages = monaco.languages.getLanguages()
@@ -77,7 +80,7 @@ export function QueryEditor({ query }: QueryEditorProps) {
           },
         })
 
-        // Define theme
+        // Define dark theme
         monaco.editor.defineTheme('query-dsl-dark', {
           base: 'vs-dark',
           inherit: true,
@@ -95,9 +98,30 @@ export function QueryEditor({ query }: QueryEditorProps) {
             'editor.background': '#1e1e1e',
           },
         })
+
+        // Define light theme
+        monaco.editor.defineTheme('query-dsl-light', {
+          base: 'vs',
+          inherit: true,
+          rules: [
+            { token: 'keyword', foreground: '0000FF', fontStyle: 'bold' },
+            { token: 'function', foreground: '795E26' },
+            { token: 'number', foreground: '098658' },
+            { token: 'string', foreground: 'A31515' },
+            { token: 'identifier', foreground: '001080' },
+            { token: 'operator', foreground: '000000' },
+            { token: 'delimiter', foreground: '000000' },
+            { token: 'comment', foreground: '008000' },
+          ],
+          colors: {
+            'editor.background': '#FFFFFF',
+          },
+        })
       }
 
-      monaco.editor.setTheme('query-dsl-dark')
+      // Set theme based on current workspace theme
+      const currentTheme = useWorkspaceStore.getState().theme
+      monaco.editor.setTheme(currentTheme === 'light' ? 'query-dsl-light' : 'query-dsl-dark')
 
       // Register completion provider
       monaco.languages.registerCompletionItemProvider('query-dsl', {
@@ -322,6 +346,13 @@ export function QueryEditor({ query }: QueryEditorProps) {
     }
   }, [])
 
+  // Switch Monaco editor theme when workspace theme changes
+  useEffect(() => {
+    if (monacoRef.current) {
+      monacoRef.current.editor.setTheme(theme === 'light' ? 'query-dsl-light' : 'query-dsl-dark')
+    }
+  }, [theme])
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Toolbar */}
@@ -354,7 +385,7 @@ export function QueryEditor({ query }: QueryEditorProps) {
           <Editor
             height="100%"
             defaultLanguage="query-dsl"
-            theme="query-dsl-dark"
+            theme={theme === 'light' ? 'query-dsl-light' : 'query-dsl-dark'}
             value={query.dsl}
             onChange={handleChange}
             onMount={handleEditorMount}
