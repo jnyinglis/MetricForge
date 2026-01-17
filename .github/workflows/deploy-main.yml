@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout current branch
         uses: actions/checkout@v4
 
       - name: Setup Node
@@ -31,18 +31,80 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      - name: Create output directory
+        run: mkdir -p output
+
+      # Fetch existing gh-pages content to preserve other deployments
+      - name: Fetch existing gh-pages content
+        continue-on-error: true
+        run: |
+          git fetch origin gh-pages:gh-pages || echo "No existing gh-pages branch"
+          if git rev-parse --verify gh-pages >/dev/null 2>&1; then
+            git checkout gh-pages
+            # Copy all existing content (will be selectively overwritten)
+            cp -r * ../output/ 2>/dev/null || true
+            cp -r .* ../output/ 2>/dev/null || true
+            git checkout -
+          fi
+
+      # Build main branch for /main/ subdirectory
       - name: Install dependencies
         working-directory: ./playground
         run: npm ci
 
-      - name: Build playground
+      - name: Build main branch
         working-directory: ./playground
-        run: npm run build
+        run: npm run build -- --base=/MetricForge/main/
+
+      - name: Copy main build to /main/ subdirectory
+        run: |
+          mkdir -p output/main
+          cp -r playground/dist/* output/main/
+
+      # Copy landing page to root
+      - name: Copy landing page
+        run: cp pages/index.html output/index.html
+
+      # Update deployments.json
+      - name: Update deployments manifest
+        run: |
+          # Get commit info
+          COMMIT_SHA="${GITHUB_SHA}"
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          DEPLOY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Check if deployments.json exists
+          if [ -f output/deployments.json ]; then
+            EXISTING_MANIFEST=$(cat output/deployments.json)
+          else
+            EXISTING_MANIFEST='{"deployments":[]}'
+          fi
+
+          # Create/update deployment entry
+          NEW_DEPLOYMENT=$(cat <<EOF
+          {
+            "branch": "main",
+            "path": "/main/",
+            "commitSha": "${COMMIT_SHA}",
+            "commitMessage": $(echo "$COMMIT_MSG" | jq -Rs .),
+            "deployedAt": "${DEPLOY_TIME}",
+            "isPrimary": true
+          }
+          EOF
+          )
+
+          # Update manifest (remove old main entry if exists, add new one, sort by deployedAt)
+          echo "$EXISTING_MANIFEST" | jq --argjson new "$NEW_DEPLOYMENT" '
+            .deployments |= (
+              map(select(.branch != "main")) + [$new] |
+              sort_by(.deployedAt) | reverse
+            )
+          ' > output/deployments.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: playground/dist
+          path: output
 
   deploy:
     environment:
