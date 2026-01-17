@@ -24,41 +24,17 @@ jobs:
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v4
-        with:
-          path: preview-branch
-
-      - name: Checkout main branch
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-branch
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: main-branch/playground/package-lock.json
+          cache-dependency-path: playground/package-lock.json
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Create output directory
-        run: mkdir -p output
-
-      # Build main branch at root
-      - name: Install dependencies (main)
-        working-directory: ./main-branch/playground
-        run: npm ci
-
-      - name: Build main branch
-        working-directory: ./main-branch/playground
-        run: npm run build
-
-      - name: Copy main build to output root
-        run: cp -r main-branch/playground/dist/* output/
-
-      # Build preview branch in subdirectory
       - name: Set preview variables
         id: vars
         run: |
@@ -68,18 +44,78 @@ jobs:
           echo "preview_dir=${SAFE_DIR}" >> "$GITHUB_OUTPUT"
           echo "base_path=/MetricForge/${SAFE_DIR}/" >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (preview)
-        working-directory: ./preview-branch/playground
+      - name: Create output directory
+        run: mkdir -p output
+
+      # Fetch existing gh-pages content to preserve other deployments
+      - name: Fetch existing gh-pages content
+        continue-on-error: true
+        run: |
+          git fetch origin gh-pages:gh-pages || echo "No existing gh-pages branch"
+          if git rev-parse --verify gh-pages >/dev/null 2>&1; then
+            git checkout gh-pages
+            # Copy all existing content (will be selectively overwritten)
+            cp -r * ../output/ 2>/dev/null || true
+            cp -r .* ../output/ 2>/dev/null || true
+            git checkout -
+          fi
+
+      # Build preview branch for subdirectory
+      - name: Install dependencies
+        working-directory: ./playground
         run: npm ci
 
       - name: Build preview branch
-        working-directory: ./preview-branch/playground
+        working-directory: ./playground
         run: npm run build -- --base=${{ steps.vars.outputs.base_path }}
 
       - name: Copy preview build to subdirectory
         run: |
           mkdir -p "output/${{ steps.vars.outputs.preview_dir }}"
-          cp -r preview-branch/playground/dist/* "output/${{ steps.vars.outputs.preview_dir }}/"
+          cp -r playground/dist/* "output/${{ steps.vars.outputs.preview_dir }}/"
+
+      # Copy landing page to root
+      - name: Copy landing page
+        run: cp pages/index.html output/index.html
+
+      # Update deployments.json
+      - name: Update deployments manifest
+        run: |
+          # Get commit info
+          COMMIT_SHA="${GITHUB_SHA}"
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          DEPLOY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          PREVIEW_DIR="${{ steps.vars.outputs.preview_dir }}"
+          PREVIEW_PATH="/$PREVIEW_DIR/"
+
+          # Check if deployments.json exists
+          if [ -f output/deployments.json ]; then
+            EXISTING_MANIFEST=$(cat output/deployments.json)
+          else
+            EXISTING_MANIFEST='{"deployments":[]}'
+          fi
+
+          # Create/update deployment entry
+          NEW_DEPLOYMENT=$(cat <<EOF
+          {
+            "branch": "${BRANCH_NAME}",
+            "path": "${PREVIEW_PATH}",
+            "commitSha": "${COMMIT_SHA}",
+            "commitMessage": $(echo "$COMMIT_MSG" | jq -Rs .),
+            "deployedAt": "${DEPLOY_TIME}",
+            "isPrimary": false
+          }
+          EOF
+          )
+
+          # Update manifest (remove old entry for this branch if exists, add new one, sort by deployedAt)
+          echo "$EXISTING_MANIFEST" | jq --argjson new "$NEW_DEPLOYMENT" --arg branch "$BRANCH_NAME" '
+            .deployments |= (
+              map(select(.branch != $branch)) + [$new] |
+              sort_by(.deployedAt) | reverse
+            )
+          ' > output/deployments.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
