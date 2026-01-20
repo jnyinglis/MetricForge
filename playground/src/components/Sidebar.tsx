@@ -7,22 +7,27 @@ export function Sidebar() {
   const schema = useWorkspaceStore((state) => state.schema)
   const metrics = useWorkspaceStore((state) => state.metrics)
   const queries = useWorkspaceStore((state) => state.queries)
+  const jsonFiles = useWorkspaceStore((state) => state.jsonFiles)
   const activeTab = useWorkspaceStore((state) => state.activeTab)
   const sidebarExpanded = useWorkspaceStore((state) => state.sidebarExpanded)
   const setActiveTab = useWorkspaceStore((state) => state.setActiveTab)
   const toggleSidebarSection = useWorkspaceStore((state) => state.toggleSidebarSection)
   const addMetric = useWorkspaceStore((state) => state.addMetric)
   const addQuery = useWorkspaceStore((state) => state.addQuery)
+  const addJsonFile = useWorkspaceStore((state) => state.addJsonFile)
   const removeMetric = useWorkspaceStore((state) => state.removeMetric)
   const removeQuery = useWorkspaceStore((state) => state.removeQuery)
+  const removeJsonFile = useWorkspaceStore((state) => state.removeJsonFile)
   const removeTable = useWorkspaceStore((state) => state.removeTable)
   const addTable = useWorkspaceStore((state) => state.addTable)
 
   const [showNewMetricInput, setShowNewMetricInput] = useState(false)
   const [showNewQueryInput, setShowNewQueryInput] = useState(false)
+  const [showNewJsonInput, setShowNewJsonInput] = useState(false)
   const [showNewTableInput, setShowNewTableInput] = useState(false)
   const [newMetricName, setNewMetricName] = useState('')
   const [newQueryName, setNewQueryName] = useState('')
+  const [newJsonName, setNewJsonName] = useState('')
   const [newTableName, setNewTableName] = useState('')
   const [newTableJson, setNewTableJson] = useState('')
 
@@ -37,6 +42,9 @@ export function Sidebar() {
     }
     if (tab.type === 'query' && activeTab.type === 'query') {
       return tab.queryName === activeTab.queryName
+    }
+    if (tab.type === 'json' && activeTab.type === 'json') {
+      return tab.jsonFileName === activeTab.jsonFileName
     }
     return tab.type === activeTab.type
   }
@@ -56,6 +64,15 @@ export function Sidebar() {
       setActiveTab({ type: 'query', queryName: newQueryName.trim() })
       setNewQueryName('')
       setShowNewQueryInput(false)
+    }
+  }
+
+  const handleAddJsonFile = () => {
+    if (newJsonName.trim()) {
+      addJsonFile(newJsonName.trim())
+      setActiveTab({ type: 'json', jsonFileName: newJsonName.trim() })
+      setNewJsonName('')
+      setShowNewJsonInput(false)
     }
   }
 
@@ -360,6 +377,78 @@ export function Sidebar() {
             {queries.length === 0 && !showNewQueryInput && (
               <div className="sidebar-item" style={{ color: 'var(--text-muted)' }}>
                 No queries defined
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* JSON Files Section */}
+      <div className="sidebar-section">
+        <div
+          className="sidebar-section-header"
+          onClick={() => toggleSidebarSection('json')}
+        >
+          <span>{sidebarExpanded.json ? '▼' : '▶'}</span>
+          <span>JSON ({jsonFiles.length})</span>
+          <button
+            className="btn btn-sm"
+            style={{ marginLeft: 'auto', padding: '2px 6px', fontSize: 11 }}
+            onClick={(e) => {
+              e.stopPropagation()
+              setShowNewJsonInput(true)
+            }}
+          >
+            +
+          </button>
+        </div>
+        {sidebarExpanded.json && (
+          <div className="sidebar-section-content">
+            {showNewJsonInput && (
+              <div className="sidebar-item" style={{ gap: 4 }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ flex: 1, padding: '2px 6px', fontSize: 12 }}
+                  placeholder="JSON file name"
+                  value={newJsonName}
+                  onChange={(e) => setNewJsonName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddJsonFile()
+                    if (e.key === 'Escape') {
+                      setShowNewJsonInput(false)
+                      setNewJsonName('')
+                    }
+                  }}
+                  autoFocus
+                />
+                <button className="btn btn-sm btn-primary" onClick={handleAddJsonFile}>
+                  Add
+                </button>
+              </div>
+            )}
+            {jsonFiles.map((jsonFile) => (
+              <div
+                key={jsonFile.name}
+                className={`sidebar-item ${isTabActive({ type: 'json', jsonFileName: jsonFile.name }) ? 'active' : ''}`}
+                onClick={() => setActiveTab({ type: 'json', jsonFileName: jsonFile.name })}
+              >
+                <span className="tab-icon">{jsonFile.valid ? '{ }' : '⚠️'}</span>
+                <span style={{ flex: 1 }}>{jsonFile.name}</span>
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    removeJsonFile(jsonFile.name)
+                  }}
+                  style={{ opacity: 0.5, cursor: 'pointer' }}
+                >
+                  ×
+                </span>
+              </div>
+            ))}
+            {jsonFiles.length === 0 && !showNewJsonInput && (
+              <div className="sidebar-item" style={{ color: 'var(--text-muted)' }}>
+                No JSON files
               </div>
             )}
           </div>

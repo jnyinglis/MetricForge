@@ -66,6 +66,16 @@ export interface ParseError {
   severity: 'error' | 'warning' | 'info'
 }
 
+export interface JsonFileDefinition {
+  name: string
+  content: string
+  valid: boolean
+  errors: ParseError[]
+  parsedData: unknown
+}
+
+export type JsonPanelTab = 'tree' | 'preview' | 'errors'
+
 export interface QueryResult {
   queryName: string
   rows: Record<string, unknown>[]
@@ -87,6 +97,7 @@ export type EditorTab =
   | { type: 'schema' }
   | { type: 'metric'; metricName: string }
   | { type: 'query'; queryName: string }
+  | { type: 'json'; jsonFileName: string }
 
 export type RightPanelTab = 'preview' | 'ast' | 'plan' | 'errors' | 'results'
 
@@ -103,12 +114,19 @@ export interface WorkspaceState {
   // Queries
   queries: QueryDefinition[]
 
+  // JSON Files
+  jsonFiles: JsonFileDefinition[]
+
   // Query Results
   queryResults: QueryResult[]
 
   // Query tab UI state
   openQueryTabs: string[]
   queryPanelTabs: Record<string, RightPanelTab>
+
+  // JSON tab UI state
+  openJsonTabs: string[]
+  jsonPanelTabs: Record<string, JsonPanelTab>
 
   // UI State
   activeTab: EditorTab | null
@@ -118,6 +136,7 @@ export interface WorkspaceState {
     schema: boolean
     metrics: boolean
     queries: boolean
+    json: boolean
   }
 
   // UI Preferences

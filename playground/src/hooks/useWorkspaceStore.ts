@@ -6,9 +6,11 @@ import type {
   SchemaDefinition,
   MetricDefinition,
   QueryDefinition,
+  JsonFileDefinition,
   QueryResult,
   EditorTab,
   RightPanelTab,
+  JsonPanelTab,
   WorkspaceExport,
   ColumnInfo,
 } from '../types/workspace'
@@ -47,6 +49,11 @@ interface WorkspaceActions {
   updateQuery: (name: string, dsl: string, valid: boolean, errors: QueryDefinition['errors']) => void
   removeQuery: (name: string) => void
 
+  // JSON file actions
+  addJsonFile: (name: string, content?: string) => void
+  updateJsonFile: (name: string, content: string, valid: boolean, errors: JsonFileDefinition['errors'], parsedData: unknown) => void
+  removeJsonFile: (name: string) => void
+
   // Results actions
   addQueryResult: (result: QueryResult) => void
   clearQueryResults: () => void
@@ -56,6 +63,8 @@ interface WorkspaceActions {
   setRightPanelTab: (tab: RightPanelTab) => void
   setQueryPanelTab: (queryName: string, tab: RightPanelTab) => void
   closeQueryTab: (queryName: string) => void
+  setJsonPanelTab: (jsonFileName: string, tab: JsonPanelTab) => void
+  closeJsonTab: (jsonFileName: string) => void
   toggleSidebarSection: (section: keyof WorkspaceState['sidebarExpanded']) => void
 
   // UI Preference actions
@@ -109,9 +118,12 @@ const initialState: WorkspaceState = {
   schema: DEFAULT_SCHEMA,
   metrics: [],
   queries: [],
+  jsonFiles: [],
   queryResults: [],
   openQueryTabs: [],
   queryPanelTabs: {},
+  openJsonTabs: [],
+  jsonPanelTabs: {},
   activeTab: null,
   rightPanelTab: 'preview',
   sidebarExpanded: {
@@ -119,6 +131,7 @@ const initialState: WorkspaceState = {
     schema: true,
     metrics: true,
     queries: true,
+    json: true,
   },
   theme: 'dark',
   sidebarCollapsed: false,
@@ -296,6 +309,54 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
         }))
       },
 
+      // JSON file actions
+      addJsonFile: (name, content = '{}') => {
+        let parsedData: unknown = null
+        let valid = true
+        const errors: JsonFileDefinition['errors'] = []
+
+        try {
+          parsedData = JSON.parse(content)
+        } catch (err) {
+          valid = false
+          errors.push({
+            message: err instanceof Error ? err.message : String(err),
+            line: 1,
+            column: 1,
+            severity: 'error',
+          })
+        }
+
+        set((state) => ({
+          jsonFiles: [
+            ...state.jsonFiles.filter((j) => j.name !== name),
+            { name, content, valid, errors, parsedData },
+          ],
+        }))
+      },
+
+      updateJsonFile: (name, content, valid, errors, parsedData) => {
+        set((state) => ({
+          jsonFiles: state.jsonFiles.map((j) =>
+            j.name === name ? { ...j, content, valid, errors, parsedData } : j
+          ),
+        }))
+      },
+
+      removeJsonFile: (name) => {
+        set((state) => ({
+          jsonFiles: state.jsonFiles.filter((j) => j.name !== name),
+          activeTab:
+            state.activeTab?.type === 'json' && state.activeTab.jsonFileName === name
+              ? null
+              : state.activeTab,
+          openJsonTabs: state.openJsonTabs.filter((j) => j !== name),
+          jsonPanelTabs: Object.fromEntries(
+            Object.entries(state.jsonPanelTabs).filter(([key]) => key !== name)
+          ),
+        }))
+      },
+
       // Results actions
       addQueryResult: (result) => {
         set((state) => ({
@@ -314,21 +375,39 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
       // UI actions
       setActiveTab: (tab) => {
         set((state) => {
-          if (!tab || tab.type !== 'query') {
+          if (!tab) {
             return { activeTab: tab }
           }
 
-          const alreadyOpen = state.openQueryTabs.includes(tab.queryName)
+          if (tab.type === 'query') {
+            const alreadyOpen = state.openQueryTabs.includes(tab.queryName)
 
-          return {
-            activeTab: tab,
-            openQueryTabs: alreadyOpen
-              ? state.openQueryTabs
-              : [...state.openQueryTabs, tab.queryName],
-            queryPanelTabs: state.queryPanelTabs[tab.queryName]
-              ? state.queryPanelTabs
-              : { ...state.queryPanelTabs, [tab.queryName]: 'preview' },
+            return {
+              activeTab: tab,
+              openQueryTabs: alreadyOpen
+                ? state.openQueryTabs
+                : [...state.openQueryTabs, tab.queryName],
+              queryPanelTabs: state.queryPanelTabs[tab.queryName]
+                ? state.queryPanelTabs
+                : { ...state.queryPanelTabs, [tab.queryName]: 'preview' },
+            }
           }
+
+          if (tab.type === 'json') {
+            const alreadyOpen = state.openJsonTabs.includes(tab.jsonFileName)
+
+            return {
+              activeTab: tab,
+              openJsonTabs: alreadyOpen
+                ? state.openJsonTabs
+                : [...state.openJsonTabs, tab.jsonFileName],
+              jsonPanelTabs: state.jsonPanelTabs[tab.jsonFileName]
+                ? state.jsonPanelTabs
+                : { ...state.jsonPanelTabs, [tab.jsonFileName]: 'tree' },
+            }
+          }
+
+          return { activeTab: tab }
         })
       },
 
@@ -357,6 +436,32 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
           return {
             openQueryTabs: remainingTabs,
             queryPanelTabs: restQueryTabs,
+            activeTab: nextActive,
+          }
+        })
+      },
+
+      setJsonPanelTab: (jsonFileName, tab) => {
+        set((state) => ({
+          jsonPanelTabs: { ...state.jsonPanelTabs, [jsonFileName]: tab },
+        }))
+      },
+
+      closeJsonTab: (jsonFileName) => {
+        set((state) => {
+          const remainingTabs = state.openJsonTabs.filter((name) => name !== jsonFileName)
+          const { [jsonFileName]: _closed, ...restJsonTabs } = state.jsonPanelTabs
+
+          let nextActive = state.activeTab
+          if (state.activeTab?.type === 'json' && state.activeTab.jsonFileName === jsonFileName) {
+            nextActive = remainingTabs.length
+              ? { type: 'json', jsonFileName: remainingTabs[remainingTabs.length - 1] }
+              : null
+          }
+
+          return {
+            openJsonTabs: remainingTabs,
+            jsonPanelTabs: restJsonTabs,
             activeTab: nextActive,
           }
         })
@@ -445,10 +550,13 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
           schema: workspace.schema,
           metrics,
           queries,
+          jsonFiles: [],
           queryResults: [],
           activeTab: null,
           openQueryTabs: [],
           queryPanelTabs: {},
+          openJsonTabs: [],
+          jsonPanelTabs: {},
         })
       },
 
