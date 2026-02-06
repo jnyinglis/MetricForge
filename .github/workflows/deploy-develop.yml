@@ -48,11 +48,9 @@ jobs:
         run: |
           git fetch origin gh-pages:gh-pages || echo "No existing gh-pages branch"
           if git rev-parse --verify gh-pages >/dev/null 2>&1; then
-            git checkout gh-pages
-            # Copy all existing content (will be selectively overwritten)
-            cp -r * ../output/ 2>/dev/null || true
-            cp -r .* ../output/ 2>/dev/null || true
-            git checkout -
+            git worktree add gh-pages-worktree gh-pages
+            rsync -a --exclude ".git" gh-pages-worktree/ output/
+            git worktree remove gh-pages-worktree
           fi
 
       # Build preview branch for subdirectory
