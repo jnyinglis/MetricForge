@@ -1,6 +1,14 @@
 {
   "deployments": [
     {
+      "branch": "main",
+      "path": "/main/",
+      "commitSha": "07953b57274636b5148f9db28a5c0031ad261041",
+      "commitMessage": "Merge pull request #23 from jnyinglis/codex/fix-workflow-failure-on-gh-pages-step\n",
+      "deployedAt": "2026-02-06T20:56:50Z",
+      "isPrimary": true
+    },
+    {
       "branch": "codex/fix-workflow-failure-on-gh-pages-step",
       "path": "/codex-fix-workflow-failure-on-gh-pages-step/",
       "commitSha": "a52da4e0e0a5d5a09a869bde79cccd1f88990624",
