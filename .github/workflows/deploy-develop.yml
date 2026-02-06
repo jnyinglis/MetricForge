@@ -117,19 +117,20 @@ jobs:
 
           git fetch origin gh-pages:gh-pages || true
           if git rev-parse --verify gh-pages >/dev/null 2>&1; then
-            git checkout gh-pages
+            git worktree add gh-pages-worktree gh-pages
           else
-            git checkout --orphan gh-pages
-            git rm -rf .
+            git worktree add -b gh-pages gh-pages-worktree
           fi
 
-          rsync -av --delete --exclude ".git" output/ ./
-          git add -A
+          rsync -av --delete --exclude ".git" output/ gh-pages-worktree/
+          git -C gh-pages-worktree add -A
 
-          if git diff --staged --quiet; then
+          if git -C gh-pages-worktree diff --staged --quiet; then
             echo "No changes to publish."
+            git worktree remove gh-pages-worktree
             exit 0
           fi
 
-          git commit -m "Update GitHub Pages (${GITHUB_REF_NAME})"
-          git push origin gh-pages
+          git -C gh-pages-worktree commit -m "Update GitHub Pages (${GITHUB_REF_NAME})"
+          git -C gh-pages-worktree push origin gh-pages
+          git worktree remove gh-pages-worktree
