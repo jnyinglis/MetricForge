@@ -1,0 +1,12 @@
+{
+  "deployments": [
+    {
+      "branch": "codex/fix-workflow-failure-on-gh-pages-step",
+      "path": "/codex-fix-workflow-failure-on-gh-pages-step/",
+      "commitSha": "a52da4e0e0a5d5a09a869bde79cccd1f88990624",
+      "commitMessage": "Use worktree for gh-pages publish\n",
+      "deployedAt": "2026-02-06T20:56:13Z",
+      "isPrimary": false
+    }
+  ]
+}

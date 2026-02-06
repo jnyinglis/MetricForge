@@ -1,14 +1,541 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/MetricForge/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Semantic Engine Playground</title>
-    <script type="module" crossorigin src="/MetricForge/assets/index-CDl46fkV.js"></script>
-    <link rel="stylesheet" crossorigin href="/MetricForge/assets/index-BGZnwrKJ.css">
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MetricForge Deployments</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      /* Light Theme Colors */
+      --light-bg-primary: #FAFAF9;
+      --light-bg-secondary: #F5F5F4;
+      --light-bg-tertiary: #FFFFFF;
+      --light-bg-hover: #E7E7E5;
+      --light-border-color: #E5E5E3;
+      --light-text-primary: #1C1C1C;
+      --light-text-secondary: #57534E;
+      --light-text-muted: #A8A29E;
+      --light-accent-primary: #0891B2;
+      --light-accent-hover: #0E7490;
+      --light-success: #059669;
+      --light-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --light-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      --light-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+      /* Dark Theme Colors */
+      --dark-bg-primary: #1A1A1A;
+      --dark-bg-secondary: #222222;
+      --dark-bg-tertiary: #2A2A2A;
+      --dark-bg-hover: #333333;
+      --dark-border-color: #3A3A3A;
+      --dark-text-primary: #E5E5E5;
+      --dark-text-secondary: #A3A3A3;
+      --dark-text-muted: #737373;
+      --dark-accent-primary: #06B6D4;
+      --dark-accent-hover: #22D3EE;
+      --dark-success: #10B981;
+      --dark-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+      --dark-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+      --dark-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
+
+      /* Default to dark theme */
+      --bg-primary: var(--dark-bg-primary);
+      --bg-secondary: var(--dark-bg-secondary);
+      --bg-tertiary: var(--dark-bg-tertiary);
+      --bg-hover: var(--dark-bg-hover);
+      --border-color: var(--dark-border-color);
+      --text-primary: var(--dark-text-primary);
+      --text-secondary: var(--dark-text-secondary);
+      --text-muted: var(--dark-text-muted);
+      --accent-primary: var(--dark-accent-primary);
+      --accent-hover: var(--dark-accent-hover);
+      --success: var(--dark-success);
+      --shadow-sm: var(--dark-shadow-sm);
+      --shadow-md: var(--dark-shadow-md);
+      --shadow-lg: var(--dark-shadow-lg);
+
+      --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    [data-theme="light"] {
+      --bg-primary: var(--light-bg-primary);
+      --bg-secondary: var(--light-bg-secondary);
+      --bg-tertiary: var(--light-bg-tertiary);
+      --bg-hover: var(--light-bg-hover);
+      --border-color: var(--light-border-color);
+      --text-primary: var(--light-text-primary);
+      --text-secondary: var(--light-text-secondary);
+      --text-muted: var(--light-text-muted);
+      --accent-primary: var(--light-accent-primary);
+      --accent-hover: var(--light-accent-hover);
+      --success: var(--light-success);
+      --shadow-sm: var(--light-shadow-sm);
+      --shadow-md: var(--light-shadow-md);
+      --shadow-lg: var(--light-shadow-lg);
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      transition: background-color var(--transition-base), color var(--transition-base);
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 48px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .header-content h1 {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+      letter-spacing: -0.02em;
+    }
+
+    .header-content p {
+      font-size: 16px;
+      color: var(--text-secondary);
+    }
+
+    .theme-toggle {
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      font-size: 20px;
+    }
+
+    .theme-toggle:hover {
+      background: var(--bg-hover);
+      transform: scale(1.05);
+    }
+
+    .theme-toggle:active {
+      transform: scale(0.95);
+    }
+
+    .deployments-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 24px;
+      margin-bottom: 40px;
+    }
+
+    .deployment-card {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all var(--transition-base);
+      box-shadow: var(--shadow-sm);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .deployment-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-lg);
+      border-color: var(--accent-primary);
+    }
+
+    .deployment-card.primary {
+      border-color: var(--accent-primary);
+      border-width: 2px;
+    }
+
+    .deployment-card.primary::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--accent-primary), var(--accent-hover));
+    }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .branch-info {
+      flex: 1;
+    }
+
+    .branch-name {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .branch-path {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .primary-badge {
+      background: var(--success);
+      color: white;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .card-body {
+      margin-bottom: 20px;
+    }
+
+    .commit-info {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .commit-message {
+      font-size: 13px;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+
+    .commit-sha {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .deploy-time {
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .deploy-time::before {
+      content: '🕒';
+      font-size: 14px;
+    }
+
+    .card-footer {
+      display: flex;
+      gap: 10px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background-color: var(--bg-secondary);
+      color: var(--text-primary);
+      text-decoration: none;
+      transition: all var(--transition-fast);
+    }
+
+    .btn:hover {
+      background-color: var(--bg-hover);
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary {
+      background-color: var(--accent-primary);
+      color: white;
+      border-color: var(--accent-primary);
+    }
+
+    .btn-primary:hover {
+      background-color: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    .loading {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-secondary);
+    }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 40px;
+      height: 40px;
+      border: 4px solid var(--border-color);
+      border-top-color: var(--accent-primary);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 16px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 32px;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+
+    .error-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    .footer {
+      margin-top: 60px;
+      padding-top: 32px;
+      border-top: 1px solid var(--border-color);
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .footer a {
+      color: var(--accent-primary);
+      text-decoration: none;
+      transition: color var(--transition-fast);
+    }
+
+    .footer a:hover {
+      color: var(--accent-hover);
+      text-decoration: underline;
+    }
+
+    @media (max-width: 768px) {
+      .deployments-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 20px;
+      }
+
+      .header-content h1 {
+        font-size: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="header-content">
+        <h1>MetricForge Deployments</h1>
+        <p>Active branch deployments on GitHub Pages</p>
+      </div>
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+        <span id="themeIcon">🌙</span>
+      </button>
+    </header>
+
+    <div id="deployments">
+      <div class="loading">
+        <div class="loading-spinner"></div>
+        <p>Loading deployments...</p>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>
+        Powered by <a href="https://pages.github.com/" target="_blank" rel="noopener">GitHub Pages</a>
+        • <a href="https://github.com/jnyinglis/MetricForge" target="_blank" rel="noopener">View Repository</a>
+      </p>
+    </footer>
+  </div>
+
+  <script>
+    // Theme management
+    const html = document.documentElement;
+    const themeToggle = document.getElementById('themeToggle');
+    const themeIcon = document.getElementById('themeIcon');
+
+    // Initialize theme from localStorage or default to dark
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    html.setAttribute('data-theme', savedTheme);
+    updateThemeIcon(savedTheme);
+
+    themeToggle.addEventListener('click', () => {
+      const currentTheme = html.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      updateThemeIcon(newTheme);
+    });
+
+    function updateThemeIcon(theme) {
+      themeIcon.textContent = theme === 'dark' ? '🌙' : '☀️';
+    }
+
+    // Load and display deployments
+    async function loadDeployments() {
+      const deploymentsContainer = document.getElementById('deployments');
+
+      try {
+        const response = await fetch('./deployments.json');
+
+        if (!response.ok) {
+          throw new Error('Failed to load deployments');
+        }
+
+        const data = await response.json();
+        const deployments = data.deployments || [];
+
+        if (deployments.length === 0) {
+          deploymentsContainer.innerHTML = `
+            <div class="error">
+              <div class="error-icon">📦</div>
+              <h2>No deployments found</h2>
+              <p>Deployments will appear here once branches are deployed.</p>
+            </div>
+          `;
+          return;
+        }
+
+        // Sort by deployedAt (newest first)
+        deployments.sort((a, b) => new Date(b.deployedAt) - new Date(a.deployedAt));
+
+        // Render deployment cards
+        deploymentsContainer.innerHTML = `
+          <div class="deployments-grid">
+            ${deployments.map(deployment => renderDeploymentCard(deployment)).join('')}
+          </div>
+        `;
+      } catch (error) {
+        console.error('Error loading deployments:', error);
+        deploymentsContainer.innerHTML = `
+          <div class="error">
+            <div class="error-icon">⚠️</div>
+            <h2>Failed to load deployments</h2>
+            <p>${error.message}</p>
+          </div>
+        `;
+      }
+    }
+
+    function renderDeploymentCard(deployment) {
+      const deployDate = new Date(deployment.deployedAt);
+      const relativeTime = getRelativeTime(deployDate);
+      const shortSha = deployment.commitSha.substring(0, 7);
+      const appUrl = `.${deployment.path}`;
+
+      return `
+        <div class="deployment-card ${deployment.isPrimary ? 'primary' : ''}">
+          <div class="card-header">
+            <div class="branch-info">
+              <div class="branch-name">${escapeHtml(deployment.branch)}</div>
+              <div class="branch-path">${escapeHtml(deployment.path)}</div>
+            </div>
+            ${deployment.isPrimary ? '<span class="primary-badge">Primary</span>' : ''}
+          </div>
+
+          <div class="card-body">
+            <div class="commit-info">
+              <div class="commit-message">${escapeHtml(deployment.commitMessage)}</div>
+              <div class="commit-sha">Commit: ${shortSha}</div>
+            </div>
+            <div class="deploy-time">
+              Deployed ${relativeTime}
+            </div>
+          </div>
+
+          <div class="card-footer">
+            <a href="${appUrl}" class="btn ${deployment.isPrimary ? 'btn-primary' : ''}">
+              Open App →
+            </a>
+          </div>
+        </div>
+      `;
+    }
+
+    function getRelativeTime(date) {
+      const now = new Date();
+      const diffMs = now - date;
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+      const diffDays = Math.floor(diffMs / 86400000);
+
+      if (diffMins < 1) return 'just now';
+      if (diffMins === 1) return '1 minute ago';
+      if (diffMins < 60) return `${diffMins} minutes ago`;
+      if (diffHours === 1) return '1 hour ago';
+      if (diffHours < 24) return `${diffHours} hours ago`;
+      if (diffDays === 1) return '1 day ago';
+      if (diffDays < 30) return `${diffDays} days ago`;
+
+      return date.toLocaleDateString();
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Load deployments on page load
+    loadDeployments();
+  </script>
+</body>
 </html>
