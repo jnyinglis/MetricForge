@@ -513,7 +513,7 @@ describe("syntaxToLogical", () => {
   });
 
   describe("Window node handling", () => {
-    it("should throw in strict mode for Window nodes", () => {
+    it("should throw for Window nodes", () => {
       const syntax: MetricExpr = {
         kind: "Window",
         base: Expr.sum("salesAmount"),
@@ -524,29 +524,13 @@ describe("syntaxToLogical", () => {
       };
 
       expect(() =>
-        syntaxToLogical(syntax, model, "fact_sales", { strictMode: true })
+        syntaxToLogical(syntax, model, "fact_sales")
       ).to.throw(TransformationError, /Window expressions should be handled/);
-    });
-
-    it("should return placeholder in non-strict mode for Window nodes", () => {
-      const syntax: MetricExpr = {
-        kind: "Window",
-        base: Expr.sum("salesAmount"),
-        partitionBy: ["storeId"],
-        orderBy: "month",
-        frame: { kind: "rolling", count: 3 },
-        aggregate: "sum",
-      };
-
-      const logical = syntaxToLogical(syntax, model, "fact_sales", {
-        strictMode: false,
-      });
-      expect(logical.kind).to.equal("ScalarFunction");
     });
   });
 
   describe("Transform node handling", () => {
-    it("should throw in strict mode for Transform nodes", () => {
+    it("should throw for Transform nodes", () => {
       const syntax: MetricExpr = {
         kind: "Transform",
         transformId: "someTransform",
@@ -555,7 +539,7 @@ describe("syntaxToLogical", () => {
       };
 
       expect(() =>
-        syntaxToLogical(syntax, model, "fact_sales", { strictMode: true })
+        syntaxToLogical(syntax, model, "fact_sales")
       ).to.throw(TransformationError, /Transform expressions should be handled/);
     });
   });

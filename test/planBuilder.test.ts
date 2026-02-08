@@ -1105,7 +1105,7 @@ describe("Window/Transform Plan Node Conversion", () => {
         baseExpr: { kind: "AttrRef" as const, name: "salesAmount" },
       };
 
-      const node = windowInfoToPlanNode(info, "input_1", model, "rolling_sales");
+      const node = windowInfoToPlanNode(info, "input_1", model, "rolling_sales", "fact_sales");
 
       expect(node.kind).to.equal("Window");
       expect(node.inputId).to.equal("input_1");
@@ -1128,7 +1128,7 @@ describe("Window/Transform Plan Node Conversion", () => {
         baseExpr: { kind: "Literal" as const, value: 1 },
       };
 
-      const node = windowInfoToPlanNode(info, "input_1", model, "cumulative_avg");
+      const node = windowInfoToPlanNode(info, "input_1", model, "cumulative_avg", "fact_sales");
 
       expect(node.partitionBy).to.be.empty;
       expect(node.orderBy).to.be.empty; // unknown attr resolves to empty
@@ -1665,6 +1665,51 @@ describe("buildLogicalPlan", () => {
 
     const totalSalesPlan = plan.outputMetrics.find((m) => m.name === "totalSales");
     expect(totalSalesPlan?.requiredAttrs.length).to.be.greaterThan(0);
+  });
+
+  it("should emit Window and Transform nodes in plan order", () => {
+    const extendedModel: SemanticModel = {
+      ...model,
+      metrics: {
+        ...model.metrics,
+        rollingSales: buildMetricFromExpr({
+          name: "rollingSales",
+          baseFact: "fact_sales",
+          expr: Expr.window(Expr.metric("totalSales"), {
+            partitionBy: ["storeId"],
+            orderBy: "weekId",
+            frame: { kind: "rolling", count: 2 },
+            aggregate: "sum",
+          }),
+        }),
+        prevWeekSales: buildMetricFromExpr({
+          name: "prevWeekSales",
+          baseFact: "fact_sales",
+          expr: Expr.tableTransform("totalSales", "prev_week", "weekId", "weekId"),
+        }),
+      },
+      tableTransforms: {
+        prev_week: {
+          inputAttr: "weekId",
+          outputAttr: "weekId",
+          table: [],
+        },
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["rollingSales", "prevWeekSales"],
+    };
+
+    const plan = buildLogicalPlan(query, extendedModel);
+    const nodes = [...plan.nodes.values()];
+    const windowNode = nodes.find((n) => n.kind === "Window");
+    const transformNode = nodes.find((n) => n.kind === "Transform");
+
+    expect(windowNode).to.exist;
+    expect(transformNode).to.exist;
+    expect(transformNode?.inputId).to.equal(windowNode?.id);
   });
 });
 

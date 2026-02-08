@@ -13,6 +13,11 @@
 
 import Enumerable from "./linq";
 import { compileDslToModel } from "./dsl";
+import { buildLogicalPlan, explainPlan } from "./planBuilder";
+import type { ExplainOptions, SemanticQueryResult } from "./planBuilder";
+import { compileLogicalExpr } from "./logicalExprCompiler";
+import type { CompiledLogicalExpr } from "./logicalExprCompiler";
+import { syntaxToLogical, TransformationError } from "./syntaxToLogical";
 
 /* --------------------------------------------------------------------------
  * BASIC TYPES
@@ -682,6 +687,12 @@ export type QuerySpecV2 = QuerySpec;
 export interface ExecutionOptions {
   /** Named values that can be referenced inside filters using `:name` tokens. */
   bindings?: Record<string, any>;
+  /** When true, return EXPLAIN output instead of executing the query. */
+  explain?: boolean;
+  /** Options for EXPLAIN output. */
+  explainOptions?: ExplainOptions;
+  /** When true, attach the logical plan to the result. */
+  includePlan?: boolean;
 }
 
 /**
@@ -1272,9 +1283,26 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
     }
   }
 
+  function requiresLegacyEvaluation(node: MetricExpr): boolean {
+    switch (node.kind) {
+      case "Window":
+      case "Transform":
+        return true;
+      case "Call":
+        if (node.fn.toLowerCase() === "last_year") {
+          return true;
+        }
+        return node.args.some(requiresLegacyEvaluation);
+      case "BinaryOp":
+        return requiresLegacyEvaluation(node.left) || requiresLegacyEvaluation(node.right);
+      default:
+        return false;
+    }
+  }
+
   validate(expr);
 
-  const evaluator = (node: MetricExpr, ctx: MetricComputationContext): number | undefined => {
+  const legacyEvaluator = (node: MetricExpr, ctx: MetricComputationContext): number | undefined => {
     switch (node.kind) {
       case "Literal":
         return node.value;
@@ -1283,7 +1311,7 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
       case "MetricRef":
         return ctx.evalMetric(node.name);
       case "Window":
-        return evaluateWindowNode(node, ctx, evaluator);
+        return evaluateWindowNode(node, ctx, legacyEvaluator);
       case "Transform": {
         if (node.transformKind === "table") {
           const cacheLabel = `${node.transformId}:transform`;
@@ -1307,8 +1335,8 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
       case "BinaryOp":
         return evalBinary(
           node.op,
-          evaluator(node.left, ctx),
-          evaluator(node.right, ctx)
+          legacyEvaluator(node.left, ctx),
+          legacyEvaluator(node.right, ctx)
         );
       case "Call": {
         const fn = node.fn.toLowerCase();
@@ -1338,7 +1366,60 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
     }
   };
 
-  return (ctx) => evaluator(expr, ctx);
+  let useLegacy = requiresLegacyEvaluation(expr);
+  if (useLegacy) {
+    return (ctx) => legacyEvaluator(expr, ctx);
+  }
+
+  let cached: {
+    model: SemanticModel;
+    baseFact: string | null;
+    evaluator: CompiledLogicalExpr;
+  } | null = null;
+
+  return (ctx) => {
+    if (useLegacy) {
+      return legacyEvaluator(expr, ctx);
+    }
+    const runtimeModel = ctx.helpers.runtime.model;
+    const baseFact = ctx.helpers.runtime.baseFact ?? null;
+    if (!cached || cached.model !== runtimeModel || cached.baseFact !== baseFact) {
+      try {
+        const logicalExpr = syntaxToLogical(expr, runtimeModel, baseFact);
+        cached = {
+          model: runtimeModel,
+          baseFact,
+          evaluator: compileLogicalExpr(logicalExpr),
+        };
+      } catch (error) {
+        if (error instanceof TransformationError) {
+          useLegacy = true;
+          return legacyEvaluator(expr, ctx);
+        }
+        throw error;
+      }
+    }
+
+    return cached.evaluator({
+      row: ctx.groupKey,
+      getMetric: ctx.evalMetric,
+      getAttribute: (id) => ctx.groupKey[id],
+      aggregate: (aggregateExpr) => {
+        if (aggregateExpr.input.kind !== "AttributeRef") {
+          throw new Error(`Aggregate ${aggregateExpr.op} requires an attribute input`);
+        }
+        const supportedOps: AggregationOperator[] = ["sum", "avg", "min", "max", "count"];
+        if (!supportedOps.includes(aggregateExpr.op as AggregationOperator)) {
+          throw new Error(`Unsupported aggregate operator: ${aggregateExpr.op}`);
+        }
+        const attrId = aggregateExpr.input.attributeId;
+        if (aggregateExpr.op === "count" && attrId === "*") {
+          return aggregateRows(ctx.rows, null, "count");
+        }
+        return aggregate(ctx.rows, attrId, aggregateExpr.op as AggregationOperator);
+      },
+    }) as number | undefined;
+  };
 }
 
 /**
@@ -2245,12 +2326,52 @@ function pickDims(row: Row, dims: string[]): Row {
 export function runSemanticQuery(
   env: { db: InMemoryDb; model: SemanticModel },
   spec: QuerySpec,
+): Row[];
+export function runSemanticQuery(
+  env: { db: InMemoryDb; model: SemanticModel },
+  spec: QuerySpec,
+  options: ExecutionOptions & { explain: true }
+): SemanticQueryResult<string>;
+export function runSemanticQuery(
+  env: { db: InMemoryDb; model: SemanticModel },
+  spec: QuerySpec,
+  options: ExecutionOptions & { includePlan: true }
+): SemanticQueryResult<Row[]>;
+export function runSemanticQuery(
+  env: { db: InMemoryDb; model: SemanticModel },
+  spec: QuerySpec,
   options?: ExecutionOptions
-): Row[] {
+): Row[];
+export function runSemanticQuery(
+  env: { db: InMemoryDb; model: SemanticModel },
+  spec: QuerySpec,
+  options?: ExecutionOptions
+): Row[] | SemanticQueryResult<Row[] | string> {
   const { db, model } = env;
   const bindings = options?.bindings ?? {};
   const dimensions = spec.dimensions;
 
+  const planStart = Date.now();
+  const plan = spec.metrics.length > 0 ? buildLogicalPlan(spec, model) : undefined;
+  const planBuildTimeMs = plan ? Date.now() - planStart : undefined;
+
+  if (options?.explain) {
+    if (!plan) {
+      return {
+        data: "EXPLAIN is unavailable for dimension-only queries without metrics.",
+        plan: undefined,
+        metadata: { planBuildTimeMs },
+      };
+    }
+    const explainOutput = explainPlan(plan, options.explainOptions);
+    return {
+      data: explainOutput,
+      plan,
+      metadata: { planBuildTimeMs },
+    };
+  }
+
+  const executionStart = Date.now();
   const rawWhereNode = normalizeFilterContext(spec.where);
   const whereNode = resolveBindingsInFilter(rawWhereNode, bindings);
 
@@ -2308,6 +2429,17 @@ export function runSemanticQuery(
       results.push(groupKey);
     });
 
+    if (options?.includePlan) {
+      return {
+        data: results,
+        plan,
+        metadata: {
+          planBuildTimeMs,
+          executionTimeMs: Date.now() - executionStart,
+          rowCount: results.length,
+        },
+      };
+    }
     return results;
   }
 
@@ -2417,6 +2549,16 @@ export function runSemanticQuery(
     });
   }
 
+  if (options?.includePlan) {
+    return {
+      data: finalRows,
+      plan,
+      metadata: {
+        planBuildTimeMs,
+        executionTimeMs: Date.now() - executionStart,
+        rowCount: finalRows.length,
+      },
+    };
+  }
   return finalRows;
 }
-
