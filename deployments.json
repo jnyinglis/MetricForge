@@ -1,20 +1,20 @@
 {
   "deployments": [
     {
+      "branch": "main",
+      "path": "/main/",
+      "commitSha": "6c90b9a54fca51b3fea29f23251cb71916176241",
+      "commitMessage": "Merge pull request #25 from jnyinglis/codex/review-implementation-plan-in-logical-ast\n",
+      "deployedAt": "2026-02-08T18:35:37Z",
+      "isPrimary": true
+    },
+    {
       "branch": "codex/review-implementation-plan-in-logical-ast",
       "path": "/codex-review-implementation-plan-in-logical-ast/",
       "commitSha": "732dd5fa8e86cd229ffb60fdc835feeef0f09682",
       "commitMessage": "Implement logical plan window/transform flow\n",
       "deployedAt": "2026-02-08T18:34:56Z",
       "isPrimary": false
-    },
-    {
-      "branch": "main",
-      "path": "/main/",
-      "commitSha": "0b58e37f96b9159929d49afd0e14c86e54f2c4ce",
-      "commitMessage": "Merge pull request #24 from jnyinglis/codex/review-logical-ast-proposal.md-for-completion-tasks\n",
-      "deployedAt": "2026-02-08T18:16:29Z",
-      "isPrimary": true
     },
     {
       "branch": "codex/review-logical-ast-proposal.md-for-completion-tasks",
