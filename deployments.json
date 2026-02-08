@@ -1,6 +1,14 @@
 {
   "deployments": [
     {
+      "branch": "codex/review-logical-ast-proposal.md-for-completion-tasks",
+      "path": "/codex-review-logical-ast-proposal.md-for-completion-tasks/",
+      "commitSha": "4e55ba8f9747d9b43b19928f31c44057d30c70c5",
+      "commitMessage": "Add logical AST implementation plan\n",
+      "deployedAt": "2026-02-08T18:14:59Z",
+      "isPrimary": false
+    },
+    {
       "branch": "main",
       "path": "/main/",
       "commitSha": "07953b57274636b5148f9db28a5c0031ad261041",
