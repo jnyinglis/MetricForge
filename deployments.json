@@ -3,9 +3,9 @@
     {
       "branch": "main",
       "path": "/main/",
-      "commitSha": "6c90b9a54fca51b3fea29f23251cb71916176241",
-      "commitMessage": "Merge pull request #25 from jnyinglis/codex/review-implementation-plan-in-logical-ast\n",
-      "deployedAt": "2026-02-08T18:35:37Z",
+      "commitSha": "a7f84bb4466e8c7389d83331efc46e906f06276e",
+      "commitMessage": "Add legacy runtime removal plan\n",
+      "deployedAt": "2026-02-08T18:49:42Z",
       "isPrimary": true
     },
     {
