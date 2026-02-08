@@ -1,6 +1,14 @@
 {
   "deployments": [
     {
+      "branch": "codex/review-implementation-plan-in-logical-ast",
+      "path": "/codex-review-implementation-plan-in-logical-ast/",
+      "commitSha": "732dd5fa8e86cd229ffb60fdc835feeef0f09682",
+      "commitMessage": "Implement logical plan window/transform flow\n",
+      "deployedAt": "2026-02-08T18:34:56Z",
+      "isPrimary": false
+    },
+    {
       "branch": "main",
       "path": "/main/",
       "commitSha": "0b58e37f96b9159929d49afd0e14c86e54f2c4ce",
