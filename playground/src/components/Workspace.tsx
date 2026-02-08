@@ -36,7 +36,7 @@ export function Workspace() {
       case 'metric': {
         const metric = metrics.find((m) => m.name === activeTab.metricName)
         if (!metric) return <div className="empty-state">Metric not found</div>
-        return <MetricEditor metric={metric} />
+        return <MetricEditor key={metric.name} metric={metric} />
       }
 
       case 'query': {

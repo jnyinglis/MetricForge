@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Editor, { OnMount, OnChange } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import { useWorkspaceStore } from '../../hooks/useWorkspaceStore'
@@ -17,9 +17,52 @@ export function MetricEditor({ metric }: MetricEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
   const updateMetric = useWorkspaceStore((state) => state.updateMetric)
-  const schema = useWorkspaceStore((state) => state.schema)
-  const metrics = useWorkspaceStore((state) => state.metrics)
   const theme = useWorkspaceStore((state) => state.theme)
+  const [draftDsl, setDraftDsl] = useState(metric.dsl)
+  const [draftErrors, setDraftErrors] = useState<MetricDefinition['errors']>(metric.errors)
+  const [isDraftValid, setIsDraftValid] = useState(metric.valid)
+
+  const isDirty = draftDsl !== metric.dsl
+
+  const setMarkers = useCallback((errors: MetricDefinition['errors']) => {
+    const model = editorRef.current?.getModel()
+    const monaco = monacoRef.current
+    if (!model || !monaco) return
+
+    monaco.editor.setModelMarkers(
+      model,
+      'metric-dsl',
+      errors.map((err) => ({
+        severity:
+          err.severity === 'error'
+            ? monaco.MarkerSeverity.Error
+            : err.severity === 'warning'
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Info,
+        message: err.message,
+        startLineNumber: err.line || 1,
+        startColumn: err.column || 1,
+        endLineNumber: err.line || 1,
+        endColumn: (err.column || 1) + 10,
+      }))
+    )
+  }, [])
+
+  const validateContent = useCallback(
+    (content: string) => {
+      const trimmed = content.trim()
+      const errors = trimmed.startsWith('metric')
+        ? parseDsl(content).errors
+        : parseMetricExpression(content).errors
+
+      setDraftErrors(errors)
+      setIsDraftValid(errors.length === 0)
+      setMarkers(errors)
+
+      return { errors, valid: errors.length === 0 }
+    },
+    [setMarkers]
+  )
 
   const handleEditorMount: OnMount = useCallback(
     (editor, monaco) => {
@@ -105,6 +148,7 @@ export function MetricEditor({ metric }: MetricEditorProps) {
       // Register completion provider
       monaco.languages.registerCompletionItemProvider('metric-dsl', {
         provideCompletionItems: (model, position) => {
+          const state = useWorkspaceStore.getState()
           const word = model.getWordUntilPosition(position)
           const range = {
             startLineNumber: position.lineNumber,
@@ -115,10 +159,10 @@ export function MetricEditor({ metric }: MetricEditorProps) {
 
           const completions = getDslCompletions(
             {
-              attributes: schema.attributes.map((a) => a.name),
-              metrics: metrics.map((m) => m.name),
-              facts: schema.facts.map((f) => f.name),
-              dimensions: schema.dimensions.map((d) => d.name),
+              attributes: state.schema.attributes.map((a) => a.name),
+              metrics: state.metrics.map((m) => m.name),
+              facts: state.schema.facts.map((f) => f.name),
+              dimensions: state.schema.dimensions.map((d) => d.name),
             },
             { line: position.lineNumber, column: position.column },
             model.getValue()
@@ -142,65 +186,25 @@ export function MetricEditor({ metric }: MetricEditorProps) {
           }
         },
       })
-
-      // Validate on content change
-      editor.onDidChangeModelContent(() => {
-        validateContent(editor.getValue())
-      })
+      validateContent(metric.dsl)
     },
-    [schema, metrics]
-  )
-
-  const validateContent = useCallback(
-    (content: string) => {
-      if (!editorRef.current) return
-
-      const model = editorRef.current.getModel()
-      if (!model) return
-
-      const trimmed = content.trim()
-      const errors = trimmed.startsWith('metric')
-        ? parseDsl(content).errors
-        : parseMetricExpression(content).errors
-
-      // Set markers
-      const monaco = (window as unknown as { monaco: typeof import('monaco-editor') }).monaco
-      if (monaco) {
-        monaco.editor.setModelMarkers(
-          model,
-          'metric-dsl',
-          errors.map((err) => ({
-            severity: err.severity === 'error' ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
-            message: err.message,
-            startLineNumber: err.line || 1,
-            startColumn: err.column || 1,
-            endLineNumber: err.line || 1,
-            endColumn: (err.column || 1) + 10,
-          }))
-        )
-      }
-
-      // Update metric state
-      updateMetric(metric.name, content, errors.length === 0, errors)
-    },
-    [metric.name, updateMetric]
+    [metric.dsl, validateContent]
   )
 
   const handleChange: OnChange = useCallback(
     (value) => {
       if (value !== undefined) {
+        setDraftDsl(value)
         validateContent(value)
       }
     },
     [validateContent]
   )
 
-  // Initial validation
   useEffect(() => {
-    if (metric.dsl) {
-      validateContent(metric.dsl)
-    }
-  }, [])
+    setDraftDsl(metric.dsl)
+    validateContent(metric.dsl)
+  }, [metric.name, metric.dsl, validateContent])
 
   // Switch Monaco editor theme when workspace theme changes
   useEffect(() => {
@@ -208,6 +212,18 @@ export function MetricEditor({ metric }: MetricEditorProps) {
       monacoRef.current.editor.setTheme(theme === 'light' ? 'metric-dsl-light' : 'metric-dsl-dark')
     }
   }, [theme])
+
+  const handleSave = useCallback(() => {
+    const result = validateContent(draftDsl)
+    updateMetric(metric.name, draftDsl, result.valid, result.errors)
+  }, [draftDsl, metric.name, updateMetric, validateContent])
+
+  const handleCancel = useCallback(() => {
+    setDraftDsl(metric.dsl)
+    setDraftErrors(metric.errors)
+    setIsDraftValid(metric.valid)
+    setMarkers(metric.errors)
+  }, [metric.dsl, metric.errors, metric.valid, setMarkers])
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -222,10 +238,20 @@ export function MetricEditor({ metric }: MetricEditorProps) {
         }}
       >
         <span style={{ fontWeight: 600 }}>{metric.name}</span>
-        <span className={`badge ${metric.valid ? 'badge-success' : 'badge-error'}`}>
-          {metric.valid ? 'Valid' : 'Invalid'}
+        <span className={`badge ${isDraftValid ? 'badge-success' : 'badge-error'}`}>
+          {isDraftValid ? 'Valid' : 'Invalid'}
         </span>
+        {isDirty && <span style={{ fontSize: 12, color: 'var(--warning)' }}>Unsaved changes</span>}
+        {draftErrors.length > 0 && (
+          <span style={{ fontSize: 12, color: 'var(--error)' }}>{draftErrors.length} error(s)</span>
+        )}
         <span style={{ flex: 1 }} />
+        <button className="btn btn-sm btn-primary" onClick={handleSave} disabled={!isDirty}>
+          Save
+        </button>
+        <button className="btn btn-sm" onClick={handleCancel} disabled={!isDirty}>
+          Cancel
+        </button>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           Tip: Use sum(), avg(), min(), max(), count() for aggregates
         </span>
@@ -237,7 +263,7 @@ export function MetricEditor({ metric }: MetricEditorProps) {
           height="100%"
           defaultLanguage="metric-dsl"
           theme={theme === 'light' ? 'metric-dsl-light' : 'metric-dsl-dark'}
-          value={metric.dsl}
+          value={draftDsl}
           onChange={handleChange}
           onMount={handleEditorMount}
           options={{
