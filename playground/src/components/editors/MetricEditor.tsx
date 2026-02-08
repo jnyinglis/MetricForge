@@ -3,7 +3,11 @@ import Editor, { OnMount, OnChange } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import { useWorkspaceStore } from '../../hooks/useWorkspaceStore'
 import type { MetricDefinition } from '../../types/workspace'
-import { parseDsl, getDslCompletions } from '../../utils/parserAdapter'
+import {
+  parseDsl,
+  parseMetricExpression,
+  getDslCompletions,
+} from '../../utils/coreLanguageService'
 
 interface MetricEditorProps {
   metric: MetricDefinition
@@ -154,12 +158,10 @@ export function MetricEditor({ metric }: MetricEditorProps) {
       const model = editorRef.current.getModel()
       if (!model) return
 
-      // Parse the content
-      const dslText = content.trim().startsWith('metric')
-        ? content
-        : `metric ${metric.name} on default = ${content}`
-
-      const { errors } = parseDsl(dslText)
+      const trimmed = content.trim()
+      const errors = trimmed.startsWith('metric')
+        ? parseDsl(content).errors
+        : parseMetricExpression(content).errors
 
       // Set markers
       const monaco = (window as unknown as { monaco: typeof import('monaco-editor') }).monaco

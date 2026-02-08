@@ -20,6 +20,9 @@ export default defineConfig({
     sourcemap: true,
   },
   server: {
+    fs: {
+      allow: [resolve(__dirname, '..')],
+    },
     port: 3000,
     open: true,
   },

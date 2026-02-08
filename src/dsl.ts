@@ -28,9 +28,37 @@ export type ParseResult<T> = { value: T; nextPos: number };
  */
 export type Parser<T> = (input: string, pos: number) => ParseResult<T> | null;
 
+export type DiagnosticSeverity = "error" | "warning" | "info";
+
+export interface DslDiagnostic {
+  message: string;
+  line: number;
+  column: number;
+  severity: DiagnosticSeverity;
+}
+
+export interface DslParseDiagnosticsResult {
+  ast: DslFileAst | null;
+  errors: DslDiagnostic[];
+}
+
+export interface MetricExprParseDiagnosticsResult {
+  expr: MetricExpr | null;
+  errors: DslDiagnostic[];
+}
+
 function skipWs(input: string, pos: number): number {
   const match = /^\s*/.exec(input.slice(pos));
   return pos + (match ? match[0].length : 0);
+}
+
+function getLineAndColumn(input: string, pos: number): { line: number; column: number } {
+  const normalizedPos = Math.max(0, Math.min(pos, input.length));
+  const lines = input.slice(0, normalizedPos).split("\n");
+  return {
+    line: lines.length,
+    column: lines[lines.length - 1].length + 1,
+  };
 }
 
 function map<A, B>(parser: Parser<A>, fn: (value: A) => B): Parser<B> {
@@ -528,6 +556,114 @@ export function parseDsl(text: string): DslFileAst {
     throw new Error("DSL parse error (TODO: better error reporting)");
   }
   return result.value;
+}
+
+export function parseDslWithDiagnostics(text: string): DslParseDiagnosticsResult {
+  try {
+    const result = fileParser(text, 0);
+    if (!result) {
+      return {
+        ast: null,
+        errors: [
+          {
+            message: "Failed to parse DSL",
+            line: 1,
+            column: 1,
+            severity: "error",
+          },
+        ],
+      };
+    }
+
+    const remainingPos = skipWs(text, result.nextPos);
+    if (remainingPos !== text.length) {
+      const { line, column } = getLineAndColumn(text, result.nextPos);
+      return {
+        ast: result.value,
+        errors: [
+          {
+            message: `Unexpected token near position ${result.nextPos}`,
+            line,
+            column,
+            severity: "error",
+          },
+        ],
+      };
+    }
+
+    return { ast: result.value, errors: [] };
+  } catch (error) {
+    return {
+      ast: null,
+      errors: [
+        {
+          message: error instanceof Error ? error.message : "Unknown DSL parse error",
+          line: 1,
+          column: 1,
+          severity: "error",
+        },
+      ],
+    };
+  }
+}
+
+export function parseMetricExpr(text: string): MetricExpr {
+  const result = expr(text, 0);
+  if (!result || skipWs(text, result.nextPos) !== text.length) {
+    throw new Error("Metric expression parse error");
+  }
+  return result.value;
+}
+
+export function parseMetricExprWithDiagnostics(
+  text: string
+): MetricExprParseDiagnosticsResult {
+  try {
+    const result = expr(text, 0);
+    if (!result) {
+      return {
+        expr: null,
+        errors: [
+          {
+            message: "Failed to parse metric expression",
+            line: 1,
+            column: 1,
+            severity: "error",
+          },
+        ],
+      };
+    }
+
+    const remainingPos = skipWs(text, result.nextPos);
+    if (remainingPos !== text.length) {
+      const { line, column } = getLineAndColumn(text, result.nextPos);
+      return {
+        expr: result.value,
+        errors: [
+          {
+            message: `Unexpected token near position ${result.nextPos}`,
+            line,
+            column,
+            severity: "error",
+          },
+        ],
+      };
+    }
+
+    return { expr: result.value, errors: [] };
+  } catch (error) {
+    return {
+      expr: null,
+      errors: [
+        {
+          message: error instanceof Error ? error.message : "Unknown metric expression parse error",
+          line: 1,
+          column: 1,
+          severity: "error",
+        },
+      ],
+    };
+  }
 }
 
 /**

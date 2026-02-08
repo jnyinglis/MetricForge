@@ -3,8 +3,8 @@ import Editor, { OnMount, OnChange } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import { useWorkspaceStore } from '../../hooks/useWorkspaceStore'
 import type { QueryDefinition, RightPanelTab } from '../../types/workspace'
-import { parseDsl, getDslCompletions } from '../../utils/parserAdapter'
-import { runQuery } from '../../utils/engineRunner'
+import { parseDsl, getDslCompletions } from '../../utils/coreLanguageService'
+import { runWorkspaceQuery } from '../../utils/coreBridge'
 
 interface QueryEditorProps {
   query: QueryDefinition
@@ -217,7 +217,7 @@ export function QueryEditor({ query }: QueryEditorProps) {
   )
 
   const handleRunQuery = useCallback(() => {
-    const result = runQuery(query.name, query.dsl, tables, schema, metrics)
+    const result = runWorkspaceQuery(query.name, query.dsl, tables, schema, metrics)
     addQueryResult(result)
   }, [query.name, query.dsl, tables, schema, metrics, addQueryResult])
 

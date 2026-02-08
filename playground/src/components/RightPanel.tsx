@@ -1,8 +1,8 @@
 import { useWorkspaceStore } from '../hooks/useWorkspaceStore'
 import type { RightPanelTab } from '../types/workspace'
-import { parseDsl } from '../utils/parserAdapter'
-import { buildLogicalPlan } from '../utils/logicalPlanBuilder'
-import { PlanVisualizer, PlanTextView } from './PlanVisualizer'
+import { parseDsl } from '../utils/coreLanguageService'
+import { buildWorkspacePlan } from '../utils/coreBridge'
+import { PlanVisualizer } from './PlanVisualizer'
 
 export function RightPanel() {
   const activeTab = useWorkspaceStore((state) => state.activeTab)
@@ -167,10 +167,16 @@ export function RightPanel() {
         return <div style={{ color: 'var(--error)' }}>Parse error - cannot build plan</div>
       }
 
-      const querySpec = ast.queries[0].spec
-
       try {
-        const plan = buildLogicalPlan(querySpec, schema, metrics)
+        const { plan, errors: planErrors } = buildWorkspacePlan(query.dsl, schema, metrics)
+        if (planErrors.length > 0 || !plan) {
+          return (
+            <div style={{ color: 'var(--error)' }}>
+              Error building plan: {planErrors[0]?.message ?? 'Unknown error'}
+            </div>
+          )
+        }
+
         return <PlanVisualizer plan={plan} />
       } catch (e) {
         return (
