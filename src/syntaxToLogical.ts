@@ -152,13 +152,7 @@ function isAggregateFunction(fn: string): fn is AggregationOperator {
 /**
  * Transform options for customizing the transformation behavior.
  */
-export interface TransformOptions {
-  /**
-   * If true, throw on Window/Transform nodes.
-   * If false, return a placeholder (for partial transformation).
-   */
-  strictMode?: boolean;
-}
+export interface TransformOptions {}
 
 /**
  * Context for the transformation, containing resolved information.
@@ -192,7 +186,7 @@ export function syntaxToLogical(
   const ctx: TransformContext = {
     model,
     baseFact,
-    options: { strictMode: true, ...options },
+    options,
   };
 
   return transformExpr(expr, ctx);
@@ -436,22 +430,12 @@ function handleWindowNode(
   expr: Extract<MetricExpr, { kind: "Window" }>,
   ctx: TransformContext
 ): LogicalExpr {
-  if (ctx.options.strictMode) {
-    throw new TransformationError(
-      `Window expressions should be handled at the plan level, not expression level. ` +
-      `This will be supported in Phase 3+.`,
-      expr,
-      { partitionBy: expr.partitionBy, orderBy: expr.orderBy }
-    );
-  }
-
-  // Non-strict mode: return a placeholder scalar function
-  return {
-    kind: "ScalarFunction",
-    fn: `__window_${expr.aggregate}__`,
-    args: [transformExpr(expr.base, ctx)],
-    resultType: DataTypes.number,
-  };
+  throw new TransformationError(
+    `Window expressions should be handled at the plan level, not expression level. ` +
+    `This will be supported in Phase 3+.`,
+    expr,
+    { partitionBy: expr.partitionBy, orderBy: expr.orderBy }
+  );
 }
 
 /**
@@ -463,22 +447,12 @@ function handleTransformNode(
   expr: Extract<MetricExpr, { kind: "Transform" }>,
   ctx: TransformContext
 ): LogicalExpr {
-  if (ctx.options.strictMode) {
-    throw new TransformationError(
-      `Transform expressions should be handled at the plan level, not expression level. ` +
-      `This will be supported in Phase 3+.`,
-      expr,
-      { transformId: expr.transformId, transformKind: expr.transformKind }
-    );
-  }
-
-  // Non-strict mode: return a placeholder scalar function
-  return {
-    kind: "ScalarFunction",
-    fn: `__transform_${expr.transformId}__`,
-    args: [transformExpr(expr.base, ctx)],
-    resultType: DataTypes.number,
-  };
+  throw new TransformationError(
+    `Transform expressions should be handled at the plan level, not expression level. ` +
+    `This will be supported in Phase 3+.`,
+    expr,
+    { transformId: expr.transformId, transformKind: expr.transformKind }
+  );
 }
 
 // ---------------------------------------------------------------------------

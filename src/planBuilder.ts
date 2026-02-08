@@ -48,7 +48,8 @@ import type {
   RowsetTransformDefinition,
   TableTransformDefinition,
 } from "./semanticEngine";
-import { syntaxToLogical, collectAttributeRefs, collectMetricRefs } from "./syntaxToLogical";
+import { syntaxToLogical } from "./syntaxToLogical";
+import { compileLogicalExprToSql } from "./logicalExprCompiler";
 
 // ---------------------------------------------------------------------------
 // PLAN NODE ID GENERATION
@@ -746,7 +747,8 @@ export function windowInfoToPlanNode(
   info: ExtractedWindowInfo,
   inputId: PlanNodeId,
   model: SemanticModel,
-  outputName: string
+  outputName: string,
+  baseFact: string | null
 ): WindowNode {
   // Resolve partition and order attributes
   const partitionBy = info.partitionBy
@@ -758,11 +760,13 @@ export function windowInfoToPlanNode(
 
   // For now, create a simple window function that references the base
   // The actual input expression will be determined during full plan building
+  const inputExpr = syntaxToLogical(info.baseExpr, model, baseFact);
+
   return createWindow(inputId, partitionBy, orderBy, info.frame, [
     {
       outputName,
       op: info.aggregate,
-      input: { kind: "Constant", value: 0, dataType: DataTypes.number }, // Placeholder
+      input: inputExpr,
     },
   ]);
 }
@@ -1344,6 +1348,10 @@ export function buildLogicalPlan(
 
   // 2. Resolve metrics and their expressions
   const metricExprs = new Map<string, LogicalExpr>();
+  const metricExprAsts = new Map<string, MetricExpr>();
+  const metricRequiredAttrNames = new Map<string, Set<string>>();
+  const windowInfos = new Map<string, ExtractedWindowInfo>();
+  const transformInfos = new Map<string, ExtractedTransformInfo>();
   const metricBaseFacts = new Map<string, string | null>();
 
   for (const metricName of query.metrics) {
@@ -1355,15 +1363,43 @@ export function buildLogicalPlan(
     // Get the expression AST (MetricDefinitionV2 has exprAst)
     const exprAst = metricDef.exprAst;
     if (!exprAst) {
-      throw new Error(`Metric "${metricName}" has no expression AST`);
+      metricExprs.set(metricName, {
+        kind: "Constant",
+        value: 0,
+        dataType: DataTypes.number,
+      });
+      metricRequiredAttrNames.set(
+        metricName,
+        new Set(metricDef.attributes ?? [])
+      );
+      metricBaseFacts.set(metricName, metricDef.baseFact ?? null);
+      continue;
     }
+
+    metricExprAsts.set(metricName, exprAst);
+    metricRequiredAttrNames.set(metricName, collectMetricExprAttributeNames(exprAst));
+    if (exprAst.kind === "Window") {
+      const info = extractWindowInfo(exprAst);
+      if (info) {
+        windowInfos.set(metricName, info);
+      }
+    }
+    if (exprAst.kind === "Transform") {
+      const info = extractTransformInfo(exprAst);
+      if (info) {
+        transformInfos.set(metricName, info);
+      }
+    }
+
+    const exprForLogical = exprAst.kind === "Window" || exprAst.kind === "Transform"
+      ? exprAst.base
+      : exprAst;
 
     // Transform the metric expression to LogicalExpr
     const logicalExpr = syntaxToLogical(
-      exprAst,
+      exprForLogical,
       model,
-      metricDef.baseFact ?? null,
-      { strictMode: false } // Allow Window/Transform placeholders
+      metricDef.baseFact ?? null
     );
 
     metricExprs.set(metricName, logicalExpr);
@@ -1386,11 +1422,10 @@ export function buildLogicalPlan(
   }
 
   // Add attributes from metric expressions
-  for (const expr of metricExprs.values()) {
-    const attrRefs = collectAttributeRefs(expr);
-    for (const ref of attrRefs) {
-      if (ref.attributeId !== "*") {
-        allRequiredAttrs.add(ref.attributeId);
+  for (const attrNames of metricRequiredAttrNames.values()) {
+    for (const attr of attrNames) {
+      if (attr !== "*") {
+        allRequiredAttrs.add(attr);
       }
     }
   }
@@ -1486,6 +1521,35 @@ export function buildLogicalPlan(
     currentNodeId = aggNode.id;
   }
 
+  for (const metricName of metricEvalOrder) {
+    const windowInfo = windowInfos.get(metricName);
+    if (windowInfo) {
+      const baseFact = metricBaseFacts.get(metricName) ?? null;
+      const windowNode = windowInfoToPlanNode(
+        windowInfo,
+        currentNodeId,
+        model,
+        metricName,
+        baseFact
+      );
+      dag.addNode(windowNode);
+      currentNodeId = windowNode.id;
+    }
+
+    const transformInfo = transformInfos.get(metricName);
+    if (transformInfo) {
+      const transformNode = transformInfoToPlanNode(
+        transformInfo,
+        currentNodeId,
+        model
+      );
+      if (transformNode) {
+        dag.addNode(transformNode);
+        currentNodeId = transformNode.id;
+      }
+    }
+  }
+
   dag.setRoot(currentNodeId);
 
   // 9. Build LogicalMetricPlan for each metric
@@ -1495,7 +1559,10 @@ export function buildLogicalPlan(
     const expr = metricExprs.get(metricName)!;
     const baseFact = metricBaseFacts.get(metricName) ?? null;
     const deps = depGraph.get(metricName) ?? new Set();
-    const attrRefs = collectAttributeRefs(expr);
+    const attrRefs = resolveAttributeRefs(
+      Array.from(metricRequiredAttrNames.get(metricName) ?? new Set()),
+      model
+    );
     const phase = phases.get(metricName) ?? 0;
 
     outputMetrics.push({
@@ -1510,6 +1577,42 @@ export function buildLogicalPlan(
 
   // 10. Assemble the final plan
   return assemblePlan(dag, outputGrain, outputMetrics, metricEvalOrder);
+}
+
+function collectMetricExprAttributeNames(expr: MetricExpr): Set<string> {
+  const attrs = new Set<string>();
+
+  function walk(e: MetricExpr): void {
+    switch (e.kind) {
+      case "Literal":
+        return;
+      case "AttrRef":
+        attrs.add(e.name);
+        return;
+      case "MetricRef":
+        return;
+      case "Transform":
+        if (e.inputAttr) attrs.add(e.inputAttr);
+        if (e.outputAttr) attrs.add(e.outputAttr);
+        walk(e.base);
+        return;
+      case "Call":
+        e.args.forEach(walk);
+        return;
+      case "Window":
+        e.partitionBy.forEach((attr) => attrs.add(attr));
+        attrs.add(e.orderBy);
+        walk(e.base);
+        return;
+      case "BinaryOp":
+        walk(e.left);
+        walk(e.right);
+        return;
+    }
+  }
+
+  walk(expr);
+  return attrs;
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,186 +1867,6 @@ export function formatLogicalExpr(expr: LogicalExpr): string {
  * Context for evaluating a compiled LogicalExpr.
  * This provides the runtime environment for expression evaluation.
  */
-export interface LogicalExprEvalContext {
-  /** Current row being processed */
-  row: Record<string, unknown>;
-  /** Function to get a metric value by name */
-  getMetric: (name: string) => number | undefined;
-  /** Function to get an attribute value by id */
-  getAttribute: (id: string) => unknown;
-}
-
-/**
- * A compiled evaluator function for a LogicalExpr.
- * Takes a context and returns the computed value.
- */
-export type CompiledLogicalExpr = (ctx: LogicalExprEvalContext) => unknown;
-
-/**
- * Compile a LogicalExpr into an executable evaluator function.
- * This is the bridge between the logical plan and runtime execution.
- *
- * @param expr - The LogicalExpr to compile
- * @returns A function that evaluates the expression given a context
- */
-export function compileLogicalExpr(expr: LogicalExpr): CompiledLogicalExpr {
-  switch (expr.kind) {
-    case "Constant":
-      return () => expr.value;
-
-    case "AttributeRef":
-      return (ctx) => ctx.getAttribute(expr.attributeId);
-
-    case "MetricRef":
-      return (ctx) => ctx.getMetric(expr.metricName);
-
-    case "Aggregate": {
-      const inputFn = compileLogicalExpr(expr.input);
-      return (ctx) => {
-        // Aggregates are typically pre-computed at the plan level
-        // This returns the aggregated value from context
-        const val = inputFn(ctx);
-        // In a full implementation, aggregation happens at the plan node level
-        // Here we just pass through for scalar evaluation
-        return val;
-      };
-    }
-
-    case "ScalarOp": {
-      const leftFn = compileLogicalExpr(expr.left);
-      const rightFn = compileLogicalExpr(expr.right);
-      return (ctx) => {
-        const l = Number(leftFn(ctx));
-        const r = Number(rightFn(ctx));
-        switch (expr.op) {
-          case "+": return l + r;
-          case "-": return l - r;
-          case "*": return l * r;
-          case "/": return r !== 0 ? l / r : undefined;
-          case "%": return r !== 0 ? l % r : undefined;
-          default: return undefined;
-        }
-      };
-    }
-
-    case "ScalarFunction": {
-      const argFns = expr.args.map(compileLogicalExpr);
-      return (ctx) => {
-        const args = argFns.map((fn) => fn(ctx));
-        const fn = expr.fn.toLowerCase();
-        switch (fn) {
-          case "abs": return Math.abs(Number(args[0]));
-          case "round": return Math.round(Number(args[0]));
-          case "floor": return Math.floor(Number(args[0]));
-          case "ceil": return Math.ceil(Number(args[0]));
-          case "sqrt": return Math.sqrt(Number(args[0]));
-          case "power": return Math.pow(Number(args[0]), Number(args[1]));
-          case "log": return Math.log(Number(args[0]));
-          case "exp": return Math.exp(Number(args[0]));
-          case "upper": return String(args[0]).toUpperCase();
-          case "lower": return String(args[0]).toLowerCase();
-          case "length": return String(args[0]).length;
-          case "substring": return String(args[0]).substring(Number(args[1]), Number(args[2]));
-          case "concat": return args.map(String).join("");
-          case "trim": return String(args[0]).trim();
-          case "coalesce": return args.find((a) => a != null);
-          case "nullif": return args[0] === args[1] ? null : args[0];
-          case "ifnull": return args[0] ?? args[1];
-          default: return undefined;
-        }
-      };
-    }
-
-    case "Conditional": {
-      const condFn = compileLogicalExpr(expr.condition);
-      const thenFn = compileLogicalExpr(expr.thenExpr);
-      const elseFn = compileLogicalExpr(expr.elseExpr);
-      return (ctx) => {
-        const cond = condFn(ctx);
-        return cond ? thenFn(ctx) : elseFn(ctx);
-      };
-    }
-
-    case "Coalesce": {
-      const exprFns = expr.exprs.map(compileLogicalExpr);
-      return (ctx) => {
-        for (const fn of exprFns) {
-          const val = fn(ctx);
-          if (val != null) return val;
-        }
-        return null;
-      };
-    }
-
-    case "Comparison": {
-      const leftFn = compileLogicalExpr(expr.left);
-      const rightFn = compileLogicalExpr(expr.right);
-      return (ctx) => {
-        const l = leftFn(ctx);
-        const r = rightFn(ctx);
-        switch (expr.op) {
-          case "=": return l === r;
-          case "!=": return l !== r;
-          case "<": return (l as number) < (r as number);
-          case "<=": return (l as number) <= (r as number);
-          case ">": return (l as number) > (r as number);
-          case ">=": return (l as number) >= (r as number);
-          default: return false;
-        }
-      };
-    }
-
-    case "LogicalOp": {
-      const operandFns = expr.operands.map(compileLogicalExpr);
-      return (ctx) => {
-        switch (expr.op) {
-          case "and":
-            return operandFns.every((fn) => fn(ctx));
-          case "or":
-            return operandFns.some((fn) => fn(ctx));
-          case "not":
-            return !operandFns[0](ctx);
-          default:
-            return false;
-        }
-      };
-    }
-
-    case "InList": {
-      const exprFn = compileLogicalExpr(expr.expr);
-      const valueSet = new Set(expr.values.map((v) => v.value));
-      return (ctx) => {
-        const val = exprFn(ctx);
-        const inList = valueSet.has(val as string | number | boolean);
-        return expr.negated ? !inList : inList;
-      };
-    }
-
-    case "Between": {
-      const exprFn = compileLogicalExpr(expr.expr);
-      const lowFn = compileLogicalExpr(expr.low);
-      const highFn = compileLogicalExpr(expr.high);
-      return (ctx) => {
-        const val = exprFn(ctx) as number;
-        const low = lowFn(ctx) as number;
-        const high = highFn(ctx) as number;
-        return val >= low && val <= high;
-      };
-    }
-
-    case "IsNull": {
-      const exprFn = compileLogicalExpr(expr.expr);
-      return (ctx) => {
-        const val = exprFn(ctx);
-        const isNull = val === null || val === undefined;
-        return expr.negated ? !isNull : isNull;
-      };
-    }
-
-    default:
-      return () => undefined;
-  }
-}
 
 /**
  * Compile a LogicalExpr to a SQL fragment string.
@@ -1953,75 +1876,6 @@ export function compileLogicalExpr(expr: LogicalExpr): CompiledLogicalExpr {
  * @param aliasMap - Optional map of attribute IDs to SQL column names
  * @returns SQL fragment string
  */
-export function compileLogicalExprToSql(
-  expr: LogicalExpr,
-  aliasMap: Map<string, string> = new Map()
-): string {
-  const col = (attrId: string) => aliasMap.get(attrId) ?? attrId;
-
-  switch (expr.kind) {
-    case "Constant":
-      if (typeof expr.value === "string") {
-        return `'${expr.value.replace(/'/g, "''")}'`;
-      }
-      if (expr.value === null) return "NULL";
-      if (typeof expr.value === "boolean") return expr.value ? "TRUE" : "FALSE";
-      return String(expr.value);
-
-    case "AttributeRef":
-      return col(expr.attributeId);
-
-    case "MetricRef":
-      // Metrics are referenced by name in SQL (typically as computed columns)
-      return `"${expr.metricName}"`;
-
-    case "Aggregate":
-      return `${expr.op.toUpperCase()}(${compileLogicalExprToSql(expr.input, aliasMap)})`;
-
-    case "ScalarOp":
-      return `(${compileLogicalExprToSql(expr.left, aliasMap)} ${expr.op} ${compileLogicalExprToSql(expr.right, aliasMap)})`;
-
-    case "ScalarFunction":
-      return `${expr.fn.toUpperCase()}(${expr.args.map((a) => compileLogicalExprToSql(a, aliasMap)).join(", ")})`;
-
-    case "Conditional":
-      return `CASE WHEN ${compileLogicalExprToSql(expr.condition, aliasMap)} THEN ${compileLogicalExprToSql(expr.thenExpr, aliasMap)} ELSE ${compileLogicalExprToSql(expr.elseExpr, aliasMap)} END`;
-
-    case "Coalesce":
-      return `COALESCE(${expr.exprs.map((e) => compileLogicalExprToSql(e, aliasMap)).join(", ")})`;
-
-    case "Comparison":
-      const sqlOp = expr.op === "!=" ? "<>" : expr.op;
-      return `(${compileLogicalExprToSql(expr.left, aliasMap)} ${sqlOp} ${compileLogicalExprToSql(expr.right, aliasMap)})`;
-
-    case "LogicalOp":
-      if (expr.op === "not") {
-        return `NOT (${compileLogicalExprToSql(expr.operands[0], aliasMap)})`;
-      }
-      return `(${expr.operands.map((o) => compileLogicalExprToSql(o, aliasMap)).join(` ${expr.op.toUpperCase()} `)})`;
-
-    case "InList": {
-      const valuesStr = expr.values
-        .map((v) => {
-          if (typeof v.value === "string") return `'${v.value.replace(/'/g, "''")}'`;
-          return String(v.value);
-        })
-        .join(", ");
-      const notStr = expr.negated ? " NOT" : "";
-      return `(${compileLogicalExprToSql(expr.expr, aliasMap)}${notStr} IN (${valuesStr}))`;
-    }
-
-    case "Between":
-      return `(${compileLogicalExprToSql(expr.expr, aliasMap)} BETWEEN ${compileLogicalExprToSql(expr.low, aliasMap)} AND ${compileLogicalExprToSql(expr.high, aliasMap)})`;
-
-    case "IsNull":
-      const nullOp = expr.negated ? "IS NOT NULL" : "IS NULL";
-      return `(${compileLogicalExprToSql(expr.expr, aliasMap)} ${nullOp})`;
-
-    default:
-      return "NULL";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // SEMANTIC QUERY INTEGRATION (Phase 5)
@@ -2214,3 +2068,10 @@ function buildFromClauses(plan: LogicalQueryPlan): string {
   const result = visit(plan.rootNodeId);
   return result || "(no tables)";
 }
+
+export {
+  compileLogicalExpr,
+  compileLogicalExprToSql,
+  LogicalExprEvalContext,
+  CompiledLogicalExpr,
+} from "./logicalExprCompiler";
