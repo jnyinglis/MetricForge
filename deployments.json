@@ -3,9 +3,9 @@
     {
       "branch": "main",
       "path": "/main/",
-      "commitSha": "a7f84bb4466e8c7389d83331efc46e906f06276e",
-      "commitMessage": "Add legacy runtime removal plan\n",
-      "deployedAt": "2026-02-08T18:49:42Z",
+      "commitSha": "cfdf58bf3bc81ba676a45a67e76c6a233f9880eb",
+      "commitMessage": "Implement legacy runtime removal\n",
+      "deployedAt": "2026-02-08T19:03:03Z",
       "isPrimary": true
     },
     {
