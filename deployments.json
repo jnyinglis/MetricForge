@@ -3,9 +3,9 @@
     {
       "branch": "main",
       "path": "/main/",
-      "commitSha": "e1da37c692fbed780d64b2871a067248124972ed",
-      "commitMessage": "Align playground with core\n",
-      "deployedAt": "2026-02-08T19:31:30Z",
+      "commitSha": "ab3bab4b8c3c46128ecb8fa48968b8f03ce3cd19",
+      "commitMessage": "Implement playground core alignment\n",
+      "deployedAt": "2026-02-08T19:49:19Z",
       "isPrimary": true
     },
     {
