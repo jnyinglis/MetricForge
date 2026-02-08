@@ -75,12 +75,14 @@ import {
   ExplainOptions,
   explainPlan,
   formatLogicalExpr,
-  compileLogicalExpr,
-  compileLogicalExprToSql,
-  LogicalExprEvalContext,
   buildQueryPlan,
   planToSql,
 } from "../src/planBuilder";
+import {
+  compileLogicalExpr,
+  compileLogicalExprToSql,
+} from "../src/logicalExprCompiler";
+import type { LogicalExprEvalContext } from "../src/logicalExprCompiler";
 
 // ---------------------------------------------------------------------------
 // TEST FIXTURES
@@ -1618,6 +1620,32 @@ describe("buildLogicalPlan", () => {
     expect(() => buildLogicalPlan(query, model)).to.throw("Unknown metric");
   });
 
+  it("should fail fast when a metric is missing exprAst", () => {
+    const legacyMetric: MetricDefinition = {
+      name: "legacyMetric",
+      baseFact: "fact_sales",
+      attributes: ["salesAmount"],
+      eval: () => 1,
+    };
+
+    const legacyModel: SemanticModel = {
+      ...model,
+      metrics: {
+        ...model.metrics,
+        legacyMetric,
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName"],
+      metrics: ["legacyMetric"],
+    };
+
+    expect(() => buildLogicalPlan(query, legacyModel)).to.throw(
+      'Metric "legacyMetric" is missing exprAst'
+    );
+  });
+
   it("should throw for circular metric dependencies", () => {
     const circularModel: SemanticModel = {
       ...model,
@@ -1710,6 +1738,35 @@ describe("buildLogicalPlan", () => {
     expect(windowNode).to.exist;
     expect(transformNode).to.exist;
     expect(transformNode?.inputId).to.equal(windowNode?.id);
+  });
+
+  it("should represent last_year metrics as rowset transform plan nodes", () => {
+    const extendedModel: SemanticModel = {
+      ...model,
+      metrics: {
+        ...model.metrics,
+        totalSalesLastYear: buildMetricFromExpr({
+          name: "totalSalesLastYear",
+          baseFact: "fact_sales",
+          expr: Expr.lastYear("totalSales", "weekId"),
+        }),
+      },
+    };
+
+    const query = {
+      dimensions: ["storeName", "weekId"],
+      metrics: ["totalSales", "totalSalesLastYear"],
+    };
+
+    const plan = buildLogicalPlan(query, extendedModel);
+    const transformNode = [...plan.nodes.values()].find(
+      (node) =>
+        node.kind === "Transform" &&
+        node.transformKind === "rowset" &&
+        node.transformId === "last_year:weekId"
+    );
+
+    expect(transformNode).to.exist;
   });
 });
 

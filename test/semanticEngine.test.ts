@@ -12,7 +12,6 @@ import {
   SemanticModel,
   buildMetricFromExpr,
   compileMetricExpr,
-  evaluateMetricRuntime,
   rowsToEnumerable,
   runSemanticQuery,
   f,
@@ -650,8 +649,30 @@ describe("bindings", () => {
 });
 
 describe("metric expression compiler", () => {
+  const compilerModel: SemanticModel = {
+    facts: { fact_sales: { table: "fact_sales" } },
+    dimensions: {},
+    attributes: {
+      sales_amount: { table: "fact_sales" },
+      week: { table: "fact_sales" },
+    },
+    joins: [],
+    metrics: {
+      sum_sales: {
+        name: "sum_sales",
+        baseFact: "fact_sales",
+        eval: () => undefined,
+      },
+      sum_sales_last_year: {
+        name: "sum_sales_last_year",
+        baseFact: "fact_sales",
+        eval: () => undefined,
+      },
+    },
+  };
+
   const dummyRuntime: MetricRuntime = {
-    model: { facts: {}, dimensions: {}, attributes: {}, joins: [], metrics: {} },
+    model: compilerModel,
     db: { tables: {} },
     relation: rowsToEnumerable([]),
     whereFilter: null,
@@ -709,96 +730,23 @@ describe("metric expression compiler", () => {
     expect(evalFn(ctx)).to.equal(50);
   });
 
-  it("applies last_year rowset transforms", () => {
-    const db: InMemoryDb = {
-      tables: {
-        fact_sales: [
-          { tradyrwkcode: 202401, sales_amount: 60 },
-          { tradyrwkcode: 202501, sales_amount: 100 },
-        ],
-        tradyrwk_transform: [
-          { tradyrwkcode: 202501, tradyrwkcode_lastyear: 202401 },
-        ],
-      },
-    };
-
-    const sumSales = buildMetricFromExpr({
-      name: "sum_sales",
-      baseFact: "fact_sales",
-      expr: { kind: "Call", fn: "sum", args: [{ kind: "AttrRef", name: "sales_amount" }] },
+  it("surfaces transformation errors instead of falling back for plan-level expressions", () => {
+    const expr: MetricExpr = Expr.window(Expr.metric("sum_sales"), {
+      partitionBy: [],
+      orderBy: "week",
+      frame: { kind: "rolling", count: 2 },
+      aggregate: "sum",
     });
 
-    const model: SemanticModel = {
-      facts: { fact_sales: { table: "fact_sales" } },
-      dimensions: {},
-      attributes: {},
-      joins: [],
-      metrics: { sum_sales: sumSales },
-      rowsetTransforms: {
-        "last_year:tradyrwkcode": {
-          table: "tradyrwk_transform",
-          anchorAttr: "tradyrwkcode",
-          fromColumn: "tradyrwkcode",
-          toColumn: "tradyrwkcode_lastyear",
-          factAttr: "tradyrwkcode",
-        },
-      },
-    };
-
-    const runtime: MetricRuntime = {
-      model,
-      db,
-      baseFact: "fact_sales",
-      relation: rowsToEnumerable(db.tables.fact_sales),
-      whereFilter: null,
-      bindings: {},
-      groupDimensions: ["tradyrwkcode"],
-    };
-
-    const transformFn = (transformId: string, groupKey: Record<string, any>) => {
-      const transform = runtime.model.rowsetTransforms?.[transformId];
-      if (!transform) throw new Error("missing transform");
-
-      const anchorValue = groupKey[transform.anchorAttr];
-      const transformRows = rowsToEnumerable(runtime.db.tables[transform.table] ?? []);
-      const targetAnchors = transformRows
-        .where((r: any) => r[transform.fromColumn] === anchorValue)
-        .select((r: any) => r[transform.toColumn])
-        .toArray();
-      const allowed = new Set(targetAnchors);
-      return runtime.relation.where(
-        (row: any) => allowed.has(row[transform.factAttr])
-      );
-    };
-
-    const expr: MetricExpr = {
-      kind: "Call",
-      fn: "last_year",
-      args: [
-        { kind: "MetricRef", name: "sum_sales" },
-        { kind: "AttrRef", name: "tradyrwkcode" },
-      ],
-    };
-
     const evalFn = compileMetricExpr(expr);
-    const metricCache = new Map<string, number | undefined>();
-    const groupRows = rowsToEnumerable(
-      db.tables.fact_sales.filter((r) => r.tradyrwkcode === 202501)
-    );
 
     const ctx: MetricComputationContext = {
-      rows: groupRows,
-      groupKey: { tradyrwkcode: 202501 },
-      evalMetric: (name) =>
-        evaluateMetricRuntime(name, runtime, { tradyrwkcode: 202501 }, groupRows, undefined, metricCache),
-      helpers: {
-        runtime,
-        applyRowsetTransform: transformFn,
-        applyTableTransform: () => rowsToEnumerable([]),
-        bind: () => undefined,
-      },
+      rows: rowsToEnumerable([]),
+      groupKey: {},
+      evalMetric: () => undefined,
+      helpers,
     };
 
-    expect(evalFn(ctx)).to.equal(60);
+    expect(() => evalFn(ctx)).to.throw("Window expressions should be handled at the plan level");
   });
 });

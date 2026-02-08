@@ -337,9 +337,12 @@ function transformCall(
 ): LogicalExpr {
   const fn = expr.fn.toLowerCase();
 
-  // Handle special functions
+  // last_year() is a plan-level transform, not an expression-level function.
   if (fn === "last_year") {
-    return transformLastYear(expr, ctx);
+    throw new TransformationError(
+      `last_year() expressions should be handled at the plan level, not expression level.`,
+      expr
+    );
   }
 
   // Handle aggregate functions
@@ -377,42 +380,6 @@ function transformAggregate(
     op,
     input,
     distinct: false, // Could be extended for COUNT(DISTINCT ...)
-    resultType: DataTypes.number,
-  };
-}
-
-/**
- * Transform last_year() function.
- * This is a special case that involves time-based transformation.
- * For Phase 1, we represent it as a scalar function; in later phases
- * it may become a plan-level transform.
- */
-function transformLastYear(
-  expr: Extract<MetricExpr, { kind: "Call" }>,
-  ctx: TransformContext
-): LogicalExpr {
-  // last_year(metric, by anchor) takes a metric ref and an anchor attribute
-  if (expr.args.length < 1) {
-    throw new TransformationError(
-      `last_year() requires at least one argument (metric reference)`,
-      expr
-    );
-  }
-
-  const metricArg = expr.args[0];
-  if (metricArg.kind !== "MetricRef") {
-    throw new TransformationError(
-      `last_year() first argument must be a metric reference`,
-      expr
-    );
-  }
-
-  // Transform to a scalar function for now
-  // In Phase 3+, this will become a TransformNode in the plan
-  return {
-    kind: "ScalarFunction",
-    fn: "last_year",
-    args: expr.args.map((arg) => transformExpr(arg, ctx)),
     resultType: DataTypes.number,
   };
 }

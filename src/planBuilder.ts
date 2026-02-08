@@ -649,6 +649,10 @@ export function isTransformExpr(expr: MetricExpr): expr is Extract<MetricExpr, {
   return expr.kind === "Transform";
 }
 
+function isLastYearCallExpr(expr: MetricExpr): expr is Extract<MetricExpr, { kind: "Call" }> {
+  return expr.kind === "Call" && expr.fn.toLowerCase() === "last_year";
+}
+
 /**
  * Extract Window information from a MetricExpr.
  * Returns null if the expression is not a Window.
@@ -687,6 +691,29 @@ export function extractTransformInfo(expr: MetricExpr): ExtractedTransformInfo |
     inputAttr: expr.inputAttr,
     outputAttr: expr.outputAttr,
     baseExpr: expr.base,
+  };
+}
+
+function extractLastYearTransformInfo(expr: MetricExpr): ExtractedTransformInfo | null {
+  if (!isLastYearCallExpr(expr)) {
+    return null;
+  }
+
+  const [metricArg, anchorArg] = expr.args;
+  if (!metricArg || metricArg.kind !== "MetricRef") {
+    throw new Error("last_year() first argument must be a metric reference");
+  }
+  if (!anchorArg || anchorArg.kind !== "AttrRef") {
+    throw new Error("last_year() second argument must be an anchor attribute reference");
+  }
+
+  return {
+    kind: "transform",
+    transformId: `last_year:${anchorArg.name}`,
+    transformKind: "rowset",
+    inputAttr: anchorArg.name,
+    outputAttr: anchorArg.name,
+    baseExpr: metricArg,
   };
 }
 
@@ -1363,17 +1390,9 @@ export function buildLogicalPlan(
     // Get the expression AST (MetricDefinitionV2 has exprAst)
     const exprAst = metricDef.exprAst;
     if (!exprAst) {
-      metricExprs.set(metricName, {
-        kind: "Constant",
-        value: 0,
-        dataType: DataTypes.number,
-      });
-      metricRequiredAttrNames.set(
-        metricName,
-        new Set(metricDef.attributes ?? [])
+      throw new Error(
+        `Metric "${metricName}" is missing exprAst; logical planning requires AST-backed metric definitions`
       );
-      metricBaseFacts.set(metricName, metricDef.baseFact ?? null);
-      continue;
     }
 
     metricExprAsts.set(metricName, exprAst);
@@ -1391,9 +1410,16 @@ export function buildLogicalPlan(
       }
     }
 
+    const lastYearInfo = extractLastYearTransformInfo(exprAst);
+    if (lastYearInfo) {
+      transformInfos.set(metricName, lastYearInfo);
+    }
+
     const exprForLogical = exprAst.kind === "Window" || exprAst.kind === "Transform"
       ? exprAst.base
-      : exprAst;
+      : lastYearInfo
+        ? lastYearInfo.baseExpr
+        : exprAst;
 
     // Transform the metric expression to LogicalExpr
     const logicalExpr = syntaxToLogical(
@@ -2068,10 +2094,3 @@ function buildFromClauses(plan: LogicalQueryPlan): string {
   const result = visit(plan.rootNodeId);
   return result || "(no tables)";
 }
-
-export {
-  compileLogicalExpr,
-  compileLogicalExprToSql,
-  LogicalExprEvalContext,
-  CompiledLogicalExpr,
-} from "./logicalExprCompiler";

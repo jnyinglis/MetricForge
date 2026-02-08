@@ -17,7 +17,7 @@ import { buildLogicalPlan, explainPlan } from "./planBuilder";
 import type { ExplainOptions, SemanticQueryResult } from "./planBuilder";
 import { compileLogicalExpr } from "./logicalExprCompiler";
 import type { CompiledLogicalExpr } from "./logicalExprCompiler";
-import { syntaxToLogical, TransformationError } from "./syntaxToLogical";
+import { syntaxToLogical } from "./syntaxToLogical";
 
 /* --------------------------------------------------------------------------
  * BASIC TYPES
@@ -1101,125 +1101,189 @@ function normalizeWindowFrame(
   };
 }
 
-function evaluateWindowNode(
-  node: Extract<MetricExpr, { kind: "Window" }>,
-  ctx: MetricComputationContext,
-  evaluator: (node: MetricExpr, ctx: MetricComputationContext) => number | undefined
-): number | undefined {
-  const runtime = ctx.helpers.runtime;
-  const cacheBucket: Map<string, Map<string, number | undefined>> =
-    (runtime as any).__windowCache ?? new Map();
-  (runtime as any).__windowCache = cacheBucket;
-
-  const cacheKey = JSON.stringify({
-    partitionBy: node.partitionBy,
-    orderBy: node.orderBy,
-    frame: node.frame,
-    aggregate: node.aggregate,
-    base: node.base,
-    grain: runtime.groupDimensions,
-  });
-
-  if (!cacheBucket.has(cacheKey)) {
-    const normalized = normalizeWindowFrame(node.frame);
-
-    const relationGroups = runtime.relation
-      .groupBy((row: Row) => keyFromRow(row, runtime.groupDimensions), (row) => row)
-      .toArray();
-
-    const metricCache = new Map<string, number | undefined>();
-
-    const partitionKey = (groupKey: Record<string, any>) => {
-      const key: Record<string, any> = {};
-      node.partitionBy.forEach((p) => (key[p] = groupKey[p]));
-      return JSON.stringify(key);
-    };
-
-    const orderValue = (groupKey: Record<string, any>) => groupKey[node.orderBy];
-
-    const rowsWithValues = relationGroups.map((group) => {
-      const sample = group.first();
-      const groupKey: Record<string, any> = {};
-      runtime.groupDimensions.forEach((d) => (groupKey[d] = (sample as any)?.[d]));
-
-      const evalMetricForGroup = (metricName: string) =>
-        evaluateMetricRuntime(metricName, runtime, groupKey, group, undefined, metricCache);
-
-      const value = evaluator(node.base, {
-        rows: group,
-        groupKey,
-        evalMetric: evalMetricForGroup,
-        helpers: ctx.helpers,
-      });
-
-      return { groupKey, value };
-    });
-
-    const valuesByGroup = new Map<string, number | undefined>();
-
-    if (normalized.mode === "offset") {
-      const groups = Enumerable.from(rowsWithValues)
-        .groupBy((g) => partitionKey(g.groupKey))
-        .toArray();
-
-      groups.forEach((group) => {
-        const ordered = group
-          .orderBy((g) => orderValue(g.groupKey))
-          .toArray();
-
-        ordered.forEach((item, idx) => {
-          const targetIdx = idx + normalized.offset;
-          const target = ordered[targetIdx];
-          const aggregated = aggregateWindowValues(
-            target ? [target.value] : [],
-            node.aggregate
-          );
-          valuesByGroup.set(keyFromGroup(item.groupKey), aggregated);
-        });
-      });
-    } else {
-      Enumerable.from(rowsWithValues)
-        .windowBy(
-          (g) => partitionKey(g.groupKey),
-          (g) => orderValue(g.groupKey),
-          normalized.frame,
-          ({ row, window }) => {
-            const aggregated = aggregateWindowValues(
-              window.map((w) => w.value),
-              node.aggregate
-            );
-            valuesByGroup.set(keyFromGroup(row.groupKey), aggregated);
-            return aggregated;
-          }
-        )
-        .toArray();
-    }
-
-    cacheBucket.set(cacheKey, valuesByGroup);
+function compileLastYearMetricExpr(expr: Extract<MetricExpr, { kind: "Call" }>): MetricEvalV2 {
+  const [metricArg, anchorArg] = expr.args;
+  if (expr.args.length !== 2) {
+    throw new Error("last_year() expects a metric reference and anchor attribute");
+  }
+  if (!metricArg || metricArg.kind !== "MetricRef") {
+    throw new Error("last_year() first argument must be a MetricRef");
+  }
+  if (!anchorArg || anchorArg.kind !== "AttrRef") {
+    throw new Error("last_year() second argument must be an AttrRef");
   }
 
-  const cachedMap = cacheBucket.get(cacheKey)!;
-  return cachedMap.get(keyFromGroup(ctx.groupKey));
+  const metricName = metricArg.name;
+  const transformId = `last_year:${anchorArg.name}`;
+  const cacheLabel = `last_year(${metricName})`;
+
+  return (ctx) => {
+    const transformed = ctx.helpers.applyRowsetTransform(transformId, ctx.groupKey);
+    return evaluateMetricRuntime(
+      metricName,
+      ctx.helpers.runtime,
+      ctx.groupKey,
+      transformed,
+      cacheLabel
+    );
+  };
 }
 
-function evalBinary(
-  op: "+" | "-" | "*" | "/",
-  left?: number,
-  right?: number
-): number | undefined {
-  if (left == null || right == null) return undefined;
-  switch (op) {
-    case "+":
-      return left + right;
-    case "-":
-      return left - right;
-    case "*":
-      return left * right;
-    case "/":
-      return right === 0 ? undefined : left / right;
-    default:
-      return undefined;
+function compileTableTransformMetricExpr(
+  expr: Extract<MetricExpr, { kind: "Transform" }>
+): MetricEvalV2 {
+  if (expr.transformKind !== "table") {
+    throw new Error(`Unsupported transform kind: ${expr.transformKind}`);
   }
+  if (expr.base.kind !== "MetricRef") {
+    throw new Error("Table transforms currently require a MetricRef base");
+  }
+
+  const metricName = expr.base.name;
+  const cacheLabel = `${expr.transformId}:transform`;
+
+  return (ctx) => {
+    const transformed = ctx.helpers.applyTableTransform(expr.transformId, ctx.groupKey);
+    return evaluateMetricRuntime(
+      metricName,
+      ctx.helpers.runtime,
+      ctx.groupKey,
+      transformed,
+      cacheLabel
+    );
+  };
+}
+
+function compileWindowMetricExpr(expr: Extract<MetricExpr, { kind: "Window" }>): MetricEvalV2 {
+  if (!expr.orderBy) {
+    throw new Error("windowBy() requires an orderBy attribute");
+  }
+  if (!expr.frame) {
+    throw new Error("windowBy() requires a frame definition");
+  }
+  if (!expr.aggregate) {
+    throw new Error("windowBy() requires an aggregate");
+  }
+
+  const supportedWindowAggs = new Set<AggregationOperator>([
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "count",
+  ]);
+  if (!supportedWindowAggs.has(expr.aggregate)) {
+    throw new Error(`Unsupported window aggregate: ${expr.aggregate}`);
+  }
+
+  validateWindowFrame(expr.frame);
+  const baseEvaluator = compileRuntimeMetricExpr(expr.base);
+
+  return (ctx) => {
+    const runtime = ctx.helpers.runtime;
+    const cacheBucket: Map<string, Map<string, number | undefined>> =
+      (runtime as any).__windowCache ?? new Map();
+    (runtime as any).__windowCache = cacheBucket;
+
+    const cacheKey = JSON.stringify({
+      partitionBy: expr.partitionBy,
+      orderBy: expr.orderBy,
+      frame: expr.frame,
+      aggregate: expr.aggregate,
+      base: expr.base,
+      grain: runtime.groupDimensions,
+    });
+
+    if (!cacheBucket.has(cacheKey)) {
+      const normalized = normalizeWindowFrame(expr.frame);
+      const relationGroups = runtime.relation
+        .groupBy((row: Row) => keyFromRow(row, runtime.groupDimensions), (row) => row)
+        .toArray();
+      const metricCache = new Map<string, number | undefined>();
+
+      const partitionKey = (groupKey: Record<string, any>) => {
+        const key: Record<string, any> = {};
+        expr.partitionBy.forEach((attr) => (key[attr] = groupKey[attr]));
+        return JSON.stringify(key);
+      };
+      const orderValue = (groupKey: Record<string, any>) => groupKey[expr.orderBy];
+
+      const rowsWithValues = relationGroups.map((group) => {
+        const sample = group.first();
+        const groupKey: Record<string, any> = {};
+        runtime.groupDimensions.forEach((dim) => (groupKey[dim] = (sample as any)?.[dim]));
+
+        const evalMetricForGroup = (metricName: string) =>
+          evaluateMetricRuntime(metricName, runtime, groupKey, group, undefined, metricCache);
+
+        const value = baseEvaluator({
+          rows: group,
+          groupKey,
+          evalMetric: evalMetricForGroup,
+          helpers: ctx.helpers,
+        });
+
+        return { groupKey, value };
+      });
+
+      const valuesByGroup = new Map<string, number | undefined>();
+      if (normalized.mode === "offset") {
+        const groups = Enumerable.from(rowsWithValues)
+          .groupBy((item) => partitionKey(item.groupKey))
+          .toArray();
+
+        groups.forEach((group) => {
+          const ordered = group
+            .orderBy((item) => orderValue(item.groupKey))
+            .toArray();
+
+          ordered.forEach((item, idx) => {
+            const targetIdx = idx + normalized.offset;
+            const target = ordered[targetIdx];
+            const aggregated = aggregateWindowValues(
+              target ? [target.value] : [],
+              expr.aggregate
+            );
+            valuesByGroup.set(keyFromGroup(item.groupKey), aggregated);
+          });
+        });
+      } else {
+        Enumerable.from(rowsWithValues)
+          .windowBy(
+            (item) => partitionKey(item.groupKey),
+            (item) => orderValue(item.groupKey),
+            normalized.frame,
+            ({ row, window }) => {
+              const aggregated = aggregateWindowValues(
+                window.map((windowRow) => windowRow.value),
+                expr.aggregate
+              );
+              valuesByGroup.set(keyFromGroup(row.groupKey), aggregated);
+              return aggregated;
+            }
+          )
+          .toArray();
+      }
+
+      cacheBucket.set(cacheKey, valuesByGroup);
+    }
+
+    const cachedMap = cacheBucket.get(cacheKey)!;
+    return cachedMap.get(keyFromGroup(ctx.groupKey));
+  };
+}
+
+function compileRuntimeMetricExpr(expr: MetricExpr): MetricEvalV2 {
+  if (expr.kind === "Window") {
+    return compileWindowMetricExpr(expr);
+  }
+  if (expr.kind === "Transform") {
+    return compileTableTransformMetricExpr(expr);
+  }
+  if (expr.kind === "Call" && expr.fn.toLowerCase() === "last_year") {
+    return compileLastYearMetricExpr(expr);
+  }
+  return compileMetricExpr(expr);
 }
 
 /**
@@ -1239,38 +1303,7 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
         if (node.args.length !== 1 || node.args[0].kind !== "AttrRef") {
           throw new Error(`${fn}() expects a single attribute reference argument`);
         }
-      } else if (fn === "last_year") {
-        const [metricArg, anchorArg] = node.args;
-        if (node.args.length !== 2) {
-          throw new Error("last_year() expects a metric reference and anchor attribute");
-        }
-        if (!metricArg || metricArg.kind !== "MetricRef") {
-          throw new Error("last_year() first argument must be a MetricRef");
-        }
-        if (!anchorArg || anchorArg.kind !== "AttrRef") {
-          throw new Error("last_year() second argument must be an AttrRef");
-        }
       }
-    }
-
-    if (node.kind === "Window") {
-      if (!node.orderBy) {
-        throw new Error("windowBy() requires an orderBy attribute");
-      }
-      if (!node.frame) {
-        throw new Error("windowBy() requires a frame definition");
-      }
-      if (!node.aggregate) {
-        throw new Error("windowBy() requires an aggregate");
-      }
-
-      const agg = node.aggregate.toLowerCase();
-      if (!("sum|avg|min|max|count".split("|") as string[]).includes(agg)) {
-        throw new Error(`Unsupported window aggregate: ${node.aggregate}`);
-      }
-
-      validateWindowFrame(node.frame);
-      validate(node.base);
     }
 
     if (node.kind === "BinaryOp") {
@@ -1278,98 +1311,10 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
       validate(node.right);
     } else if (node.kind === "Call") {
       node.args.forEach(validate);
-    } else if (node.kind === "Transform") {
-      validate(node.base);
-    }
-  }
-
-  function requiresLegacyEvaluation(node: MetricExpr): boolean {
-    switch (node.kind) {
-      case "Window":
-      case "Transform":
-        return true;
-      case "Call":
-        if (node.fn.toLowerCase() === "last_year") {
-          return true;
-        }
-        return node.args.some(requiresLegacyEvaluation);
-      case "BinaryOp":
-        return requiresLegacyEvaluation(node.left) || requiresLegacyEvaluation(node.right);
-      default:
-        return false;
     }
   }
 
   validate(expr);
-
-  const legacyEvaluator = (node: MetricExpr, ctx: MetricComputationContext): number | undefined => {
-    switch (node.kind) {
-      case "Literal":
-        return node.value;
-      case "AttrRef":
-        return Number(ctx.groupKey[node.name]);
-      case "MetricRef":
-        return ctx.evalMetric(node.name);
-      case "Window":
-        return evaluateWindowNode(node, ctx, legacyEvaluator);
-      case "Transform": {
-        if (node.transformKind === "table") {
-          const cacheLabel = `${node.transformId}:transform`;
-          const transformed = ctx.helpers.applyTableTransform(
-            node.transformId,
-            ctx.groupKey
-          );
-          if (node.base.kind !== "MetricRef") {
-            throw new Error("Table transforms currently require a MetricRef base");
-          }
-          return evaluateMetricRuntime(
-            node.base.name,
-            ctx.helpers.runtime,
-            ctx.groupKey,
-            transformed,
-            cacheLabel
-          );
-        }
-        return undefined;
-      }
-      case "BinaryOp":
-        return evalBinary(
-          node.op,
-          legacyEvaluator(node.left, ctx),
-          legacyEvaluator(node.right, ctx)
-        );
-      case "Call": {
-        const fn = node.fn.toLowerCase();
-        if (["sum", "avg", "min", "max", "count"].includes(fn)) {
-          const [arg] = node.args;
-          const attr = (arg as any).name as string;
-          if (fn === "count" && attr === "*") {
-            return aggregateRows(ctx.rows, null, "count");
-          }
-          return aggregate(ctx.rows, attr, fn as AggregationOperator);
-        }
-        if (fn === "last_year") {
-          const [metricArg, anchorArg] = node.args;
-          const transformId = `last_year:${(anchorArg as any).name}`;
-          const cacheLabel = `last_year(${(metricArg as any).name})`;
-          const transformed = ctx.helpers.applyRowsetTransform(transformId, ctx.groupKey);
-          return evaluateMetricRuntime(
-            (metricArg as any).name,
-            ctx.helpers.runtime,
-            ctx.groupKey,
-            transformed,
-            cacheLabel
-          );
-        }
-        throw new Error(`Unknown function: ${node.fn}`);
-      }
-    }
-  };
-
-  let useLegacy = requiresLegacyEvaluation(expr);
-  if (useLegacy) {
-    return (ctx) => legacyEvaluator(expr, ctx);
-  }
 
   let cached: {
     model: SemanticModel;
@@ -1378,26 +1323,15 @@ export function compileMetricExpr(expr: MetricExpr): MetricEvalV2 {
   } | null = null;
 
   return (ctx) => {
-    if (useLegacy) {
-      return legacyEvaluator(expr, ctx);
-    }
     const runtimeModel = ctx.helpers.runtime.model;
     const baseFact = ctx.helpers.runtime.baseFact ?? null;
     if (!cached || cached.model !== runtimeModel || cached.baseFact !== baseFact) {
-      try {
-        const logicalExpr = syntaxToLogical(expr, runtimeModel, baseFact);
-        cached = {
-          model: runtimeModel,
-          baseFact,
-          evaluator: compileLogicalExpr(logicalExpr),
-        };
-      } catch (error) {
-        if (error instanceof TransformationError) {
-          useLegacy = true;
-          return legacyEvaluator(expr, ctx);
-        }
-        throw error;
-      }
+      const logicalExpr = syntaxToLogical(expr, runtimeModel, baseFact);
+      cached = {
+        model: runtimeModel,
+        baseFact,
+        evaluator: compileLogicalExpr(logicalExpr),
+      };
     }
 
     return cached.evaluator({
@@ -1441,7 +1375,7 @@ export function buildMetricFromExpr(opts: {
     attributes: Array.from(attrs),
     deps: Array.from(deps),
     exprAst: opts.expr,
-    eval: compileMetricExpr(opts.expr),
+    eval: compileRuntimeMetricExpr(opts.expr),
   };
 }
 
@@ -1612,7 +1546,7 @@ export function tableTransformMetric(opts: {
     deps: [opts.baseMetric],
     description: opts.description,
     exprAst: expr,
-    eval: compileMetricExpr(expr),
+    eval: compileRuntimeMetricExpr(expr),
   };
 }
 
@@ -2351,8 +2285,10 @@ export function runSemanticQuery(
   const bindings = options?.bindings ?? {};
   const dimensions = spec.dimensions;
 
-  const planStart = Date.now();
-  const plan = spec.metrics.length > 0 ? buildLogicalPlan(spec, model) : undefined;
+  const shouldBuildPlan =
+    spec.metrics.length > 0 && (Boolean(options?.explain) || Boolean(options?.includePlan));
+  const planStart = shouldBuildPlan ? Date.now() : 0;
+  const plan = shouldBuildPlan ? buildLogicalPlan(spec, model) : undefined;
   const planBuildTimeMs = plan ? Date.now() - planStart : undefined;
 
   if (options?.explain) {
