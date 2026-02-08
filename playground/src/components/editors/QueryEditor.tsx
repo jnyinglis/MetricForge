@@ -4,7 +4,8 @@ import type { editor } from 'monaco-editor'
 import { useWorkspaceStore } from '../../hooks/useWorkspaceStore'
 import type { QueryDefinition, RightPanelTab } from '../../types/workspace'
 import { parseDsl, getDslCompletions } from '../../utils/coreLanguageService'
-import { runWorkspaceQuery } from '../../utils/coreBridge'
+import { buildWorkspacePlan, runWorkspaceQuery } from '../../utils/coreBridge'
+import { PlanVisualizer } from '../PlanVisualizer'
 
 interface QueryEditorProps {
   query: QueryDefinition
@@ -224,6 +225,7 @@ export function QueryEditor({ query }: QueryEditorProps) {
   const panelTabs: Array<{ id: RightPanelTab; label: string }> = [
     { id: 'preview', label: 'Preview' },
     { id: 'ast', label: 'AST' },
+    { id: 'plan', label: 'Plan' },
     { id: 'errors', label: 'Errors' },
     { id: 'results', label: 'Results' },
   ]
@@ -280,6 +282,21 @@ export function QueryEditor({ query }: QueryEditorProps) {
         ))}
       </div>
     )
+  }
+
+  const renderPlan = () => {
+    if (!query.dsl) return <div style={{ color: 'var(--text-muted)' }}>No plan available</div>
+
+    const { plan, errors } = buildWorkspacePlan(query.dsl, schema, metrics)
+    if (!plan || errors.length > 0) {
+      return (
+        <div style={{ color: 'var(--error)' }}>
+          Error building plan: {errors[0]?.message ?? 'Unknown error'}
+        </div>
+      )
+    }
+
+    return <PlanVisualizer plan={plan} />
   }
 
   const renderResults = () => {
@@ -421,6 +438,7 @@ export function QueryEditor({ query }: QueryEditorProps) {
           <div className="panel-content query-panel-content">
             {queryPanelTab === 'preview' && renderPreview()}
             {queryPanelTab === 'ast' && renderAst()}
+            {queryPanelTab === 'plan' && renderPlan()}
             {queryPanelTab === 'errors' && renderErrors()}
             {queryPanelTab === 'results' && renderResults()}
           </div>
