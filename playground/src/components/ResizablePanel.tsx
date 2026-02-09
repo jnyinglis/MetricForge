@@ -61,7 +61,8 @@ export function ResizablePanel({
     }
   }, [isResizing, side, minWidth, maxWidth])
 
-  const handleMouseDown = () => {
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
     setIsResizing(true)
   }
 
