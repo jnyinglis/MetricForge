@@ -3,9 +3,9 @@
     {
       "branch": "main",
       "path": "/main/",
-      "commitSha": "b752f01f8a10dff7df690709cb2bd234c3ca76c2",
-      "commitMessage": "Update playground editors\n",
-      "deployedAt": "2026-02-08T21:29:51Z",
+      "commitSha": "50f7e9fb347fc98de62260ee4ff070d9d1567fa1",
+      "commitMessage": "Fix playground resize handles triggering text selection during drag\n",
+      "deployedAt": "2026-02-09T02:01:38Z",
       "isPrimary": true
     },
     {
